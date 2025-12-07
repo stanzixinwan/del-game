@@ -7,22 +7,29 @@ import random
 class World:
     """World representation with id_roles."""
     
-    def __init__(self, num_npcs=4, seed=None, rooms=["A", "B", "C", "D"], player=None, npcs=None):
+    def __init__(self, num_npcs=4, seed=None, rooms=["A", "B", "C", "D"], player=None, npcs=None, connections=None):
         """
         Initialize the game world.
         
         Args:
             num_npcs: number of NPC agents (used only if npcs is None)
             seed: random seed for reproducibility
-            rooms: list of room names (default: ["Entrance", "Engine", "Storage", "Medbay", "Admin"])
+            rooms: list of room names (default: ["A", "B", "C", "D"])
             player: Player instance (default: creates new Player with role="bad")
             npcs: list of NPC instances (default: creates num_npcs NPCs with role="good")
+            connections: dict mapping room -> list of connected rooms (default: creates a connected graph)
         """
         if seed is not None:
             random.seed(seed)
         
         # Set rooms
         self.rooms = rooms
+        
+        # Initialize location connections (graph)
+        if connections is not None:
+            self.connections = connections
+        else:
+            self.connections = self._initialize_default_connections()
         
         # Set player (can be None for simulation mode with all NPCs)
         if player is not None:
@@ -48,6 +55,81 @@ class World:
         self._initialize_all_worlds()
         self._initialize_sus()
         self._initialize_npc_times()
+    
+    def _initialize_default_connections(self):
+        """
+        Initialize default connections between rooms.
+        Creates a connected graph where not all rooms are directly connected.
+        
+        Default layout for 4 rooms (A, B, C, D):
+        A -- B
+        |    |
+        C -- D
+        
+        Returns:
+            dict mapping room name -> list of connected room names
+        """
+        connections = {}
+        
+        if len(self.rooms) == 4:
+            # Create a 2x2 grid layout
+            a, b, c, d = self.rooms[0], self.rooms[1], self.rooms[2], self.rooms[3]
+            connections = {
+                a: [b, c],  # A connected to B and C
+                b: [a, d],  # B connected to A and D
+                c: [a, d],  # C connected to A and D
+                d: [b, c]   # D connected to B and C
+            }
+        elif len(self.rooms) == 2:
+            # Simple connection between two rooms
+            connections = {
+                self.rooms[0]: [self.rooms[1]],
+                self.rooms[1]: [self.rooms[0]]
+            }
+        elif len(self.rooms) >= 3:
+            # Create a chain with some cross-connections
+            connections = {room: [] for room in self.rooms}
+            # Chain connections
+            for i in range(len(self.rooms) - 1):
+                connections[self.rooms[i]].append(self.rooms[i + 1])
+                connections[self.rooms[i + 1]].append(self.rooms[i])
+            # Add some cross-connections for 3+ rooms
+            if len(self.rooms) >= 3:
+                # Connect first to last to create a ring
+                connections[self.rooms[0]].append(self.rooms[-1])
+                connections[self.rooms[-1]].append(self.rooms[0])
+        else:
+            # Single room or empty - no connections needed
+            connections = {room: [] for room in self.rooms}
+        
+        return connections
+    
+    def are_connected(self, room1, room2):
+        """
+        Check if two rooms are directly connected.
+        
+        Args:
+            room1: source room name
+            room2: target room name
+        
+        Returns:
+            True if rooms are directly connected, False otherwise
+        """
+        if room1 not in self.connections:
+            return False
+        return room2 in self.connections[room1]
+    
+    def get_connected_rooms(self, room):
+        """
+        Get list of rooms directly connected to the given room.
+        
+        Args:
+            room: room name
+        
+        Returns:
+            List of connected room names, empty list if room not found
+        """
+        return self.connections.get(room, [])
     
     def _initialize_all_worlds(self):
         """Initialize all possible worlds for each agent (all cases of 1 bad agent)."""
@@ -321,10 +403,36 @@ class World:
             print(f"\nResult: Tie! No one is voted out.")
             return None
     
+    def _has_kill_opportunity(self, npc):
+        """
+        Check if a bad agent has an opportunity to kill.
+        
+        Args:
+            npc: NPC instance (should be bad agent)
+        
+        Returns:
+            (target_id, True) if opportunity exists, (None, False) otherwise
+        """
+        if npc.role != "bad":
+            return None, False
+        
+        alive_agents = self.get_alive_agents()
+        agents_at_location = [a for a in alive_agents 
+                             if a.location == npc.location and a.id != npc.id]
+        
+        # If alone with exactly one target who is good, we can kill
+        if len(agents_at_location) == 1:
+            target = agents_at_location[0]
+            if target.role == "good":
+                return target.id, True
+        
+        return None, False
+    
     def update_npcs(self, delta_time=0.1):
         """
         Update NPCs: time-based action system.
         NPCs decide and act based on time, not every turn.
+        Bad agents check for kill opportunities more frequently (within 2 seconds).
         
         Args:
             delta_time: time elapsed since last update
@@ -337,20 +445,60 @@ class World:
             if npc.state != "alive":
                 continue
             
-            # Check if it's time for this NPC to act
+            # For bad agents: check for kill opportunities more aggressively (within 2 seconds)
+            if npc.role == "bad":
+                # Check if at least 2 seconds have passed since last action
+                time_since_last_action = self.current_time - npc.last_action_time
+                
+                # Check for kill opportunity if at least 2 seconds have passed
+                if time_since_last_action >= 2.0:
+                    target_id, has_opportunity = self._has_kill_opportunity(npc)
+                    if has_opportunity:
+                        # Take kill action immediately
+                        print(f"[NPC Action] {npc.id} ({npc.role}): kill {target_id} [URGENT - kill opportunity]")
+                        event = Actions.apply(self, npc, "kill", target_id)
+                        
+                        if event:
+                            if event.action == "kill":
+                                print(f"  → Event: {event.action} by {event.actor} at {event.location} (visibility: {event.visibility})")
+                                print(f"    Target killed!")
+                        
+                        # Record action time and schedule next check in 2 seconds
+                        npc.last_action_time = self.current_time
+                        npc.next_action_time = self.current_time + 2.0  # Check again in 2 seconds
+                        continue
+            
+            # Check if it's time for this NPC to act (normal scheduled action)
             if self.current_time >= npc.next_action_time:
                 decision = npc.decide_action(self)
                 if decision:
                     if isinstance(decision, tuple):
                         action_name = decision[0]
                         args = decision[1:] if len(decision) > 1 else []
+                        
+                        # Print action for visibility (especially important for bad agents)
+                        args_str = f" {args[0]}" if args and len(args) == 1 else f" {args}" if args else ""
+                        print(f"[NPC Action] {npc.id} ({npc.role}): {action_name}{args_str}")
+                        
                         # Use shared Actions library
-                        Actions.apply(self, npc, action_name, *args)
+                        event = Actions.apply(self, npc, action_name, *args)
+                        
+                        # Print event details
+                        if event:
+                            if event.action == "say" and event.statement:
+                                print(f"  → Event: {event.action} by {event.actor} at {event.location} (visibility: {event.visibility})")
+                                print(f"    Statement: {event.statement}")
+                            else:
+                                print(f"  → Event: {event.action} by {event.actor} at {event.location} (visibility: {event.visibility})")
+                                if event.action == "kill":
+                                    print(f"    Target killed!")
                     else:
                         # Legacy support: if decision is just a string, treat as action with no args
+                        print(f"[NPC Action] {npc.id} ({npc.role}): {decision}")
                         Actions.apply(self, npc, decision)
                 
                 # Schedule next action (random delay between 2-8 seconds)
+                npc.last_action_time = self.current_time
                 npc.next_action_time = self.current_time + random.uniform(2.0, 8.0)
         
         # Check win/loss conditions

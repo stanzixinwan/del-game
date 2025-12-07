@@ -62,6 +62,7 @@ class Actions:
     def enter(world, agent, target_room):
         """
         ENTER instant action - Move agent to target room (produces event).
+        Only allows movement to directly connected rooms.
         
         Args:
             world: World instance
@@ -69,9 +70,15 @@ class Actions:
             target_room: room name to move to
         
         Returns:
-            Event object or None
+            Event object or None (if invalid room or not connected)
         """
         if target_room not in world.rooms:
+            return None
+        
+        # Check if target room is connected to current location
+        current_location = agent.location
+        if current_location and not world.are_connected(current_location, target_room):
+            # Not directly connected - movement not allowed
             return None
         
         agent.location = target_room

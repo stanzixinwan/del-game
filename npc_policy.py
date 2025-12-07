@@ -76,14 +76,16 @@ def _choose_action_good(npc, world):
     if hasattr(npc, 'sus') and world.player is not None and isinstance(world.player, PlayerClass) and world.player.state == "alive":
         player_sus = npc.sus.get(world.player.id, 0)
         if player_sus > 0.5:  # High suspicion threshold
-            # Move closer to player (or to player's location if possible)
+            # Move closer to player (or to player's location if connected)
             player_location = world.player.location
             if player_location in world.rooms and player_location != npc.location:
-                return ("enter", player_location)
-            # Otherwise move to a random room
-            available_rooms = [r for r in world.rooms if r != npc.location]
-            if available_rooms:
-                return ("enter", random.choice(available_rooms))
+                # Check if player's location is connected
+                if world.are_connected(npc.location, player_location):
+                    return ("enter", player_location)
+            # Otherwise move to a random connected room
+            connected_rooms = world.get_connected_rooms(npc.location)
+            if connected_rooms:
+                return ("enter", random.choice(connected_rooms))
     
     # 3b. If no player, check suspicion of bad agents instead
     if world.player is None and hasattr(npc, 'sus'):
@@ -97,20 +99,26 @@ def _choose_action_good(npc, world):
                 most_suspicious = agent
         
         if most_suspicious and max_sus > 0.5:
-            # Move closer to suspicious agent
+            # Move closer to suspicious agent (if connected)
             target_location = most_suspicious.location
             if target_location in world.rooms and target_location != npc.location:
-                return ("enter", target_location)
+                if world.are_connected(npc.location, target_location):
+                    return ("enter", target_location)
+            # Otherwise try a connected room
+            connected_rooms = world.get_connected_rooms(npc.location)
+            if connected_rooms:
+                return ("enter", random.choice(connected_rooms))
     
     # 4. Else: with small probability, move or do task
     if random.random() < 0.8:
-        # 30% chance to move
+        # 50% chance to move
         if random.random() < 0.5:
-            available_rooms = [r for r in world.rooms if r != npc.location]
-            if available_rooms:
-                return ("enter", random.choice(available_rooms))
+            # Only move to connected rooms
+            connected_rooms = world.get_connected_rooms(npc.location)
+            if connected_rooms:
+                return ("enter", random.choice(connected_rooms))
         else:
-            # 50% of that 30% = 15% chance to do task
+            # 50% of that 50% = 25% chance to do task
             return ("task", None)
     
     # 5. Default: idle
@@ -139,19 +147,20 @@ def _choose_action_bad(npc, world):
     # If alone with a target, consider killing
     if len(agents_at_location) == 1:
         target = agents_at_location[0]
-        if target.role == "good":  # 30% chance to kill
+        if target.role == "good":  
             return ("kill", target.id)
     
     # 2. Occasionally sabotage
-    if random.random() < 0.1:  # 10% chance
+    if len(agents_at_location) == 0: 
         return ("sabo", None)
     
     # 3. Move or task (blend in)
     if random.random() < 0.3:
         if random.random() < 0.5:
-            available_rooms = [r for r in world.rooms if r != npc.location]
-            if available_rooms:
-                return ("enter", random.choice(available_rooms))
+            # Only move to connected rooms
+            connected_rooms = world.get_connected_rooms(npc.location)
+            if connected_rooms:
+                return ("enter", random.choice(connected_rooms))
         else:
             return ("task", None)
     

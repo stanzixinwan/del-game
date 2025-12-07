@@ -57,7 +57,13 @@ def player_mode():
                 pass
         
         if action_name == "enter" and not args:
-            print(f"Available rooms: {', '.join(world.rooms)}")
+            # Show only connected rooms
+            current_location = world.player.location if world.player else None
+            if current_location:
+                connected_rooms = world.get_connected_rooms(current_location)
+                print(f"Connected rooms from {current_location}: {', '.join(connected_rooms)}")
+            else:
+                print(f"Available rooms: {', '.join(world.rooms)}")
             target_room = input("Go to: ").strip()
             args = [target_room] if target_room else []
         elif action_name == "sabo" and not args:

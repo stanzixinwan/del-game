@@ -277,6 +277,7 @@ class NPC(Agent):
         # Time-based action system
         self.next_action_time = 0.0  # When this NPC should decide on next action
         self.action_duration = 0.0  # How long current action takes
+        self.last_action_time = 0.0  # When this NPC last performed an action
     
     def update_sus(self, agent_id, delta):
         """Update suspicion for an agent."""
