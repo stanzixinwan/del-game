@@ -1,5 +1,6 @@
 from agent import Agent, NPC, Player
 from event import Event
+from memory import MemoryItem
 import time
 import random
 
@@ -23,9 +24,11 @@ class World:
         # Set rooms
         self.rooms = rooms
         
-        # Set player
+        # Set player (can be None for simulation mode with all NPCs)
         if player is not None:
             self.player = player
+        elif player is False:  # Explicit False means no player
+            self.player = None
         else:
             self.player = Player("player", role="bad", location=self.rooms[0] if self.rooms else "Storage")
         
@@ -82,15 +85,19 @@ class World:
     
     def get_all_agents(self):
         """Get all agents (player + NPCs)."""
-        return [self.player] + self.npcs
+        if self.player is not None and isinstance(self.player, Player):
+            return [self.player] + self.npcs
+        else:
+            return self.npcs
     
     def get_alive_agents(self):
         """Get all alive agents."""
         return [a for a in self.get_all_agents() if a.state == "alive"]
     
-    def create_event(self, action, actor, location, witnesses=None, visibility="private"):
+    def create_event(self, action, actor, location, witnesses=None, visibility="private", statement=None):
         """
         Create and process an event.
+        Creates MemoryItems for agents based on how they observed the event.
         
         Args:
             action: action type
@@ -98,37 +105,56 @@ class World:
             location: location of event
             witnesses: list of witness ids (None for private)
             visibility: "private" | "witnessed" | "public"
+            statement: Statement object (only for "say" actions)
         
         Returns:
             Event object
         """
-        event = Event(action, actor, location, witnesses, visibility)
+        event = Event(action, actor, location, witnesses, visibility, statement=statement)
         self.event_history.append(event)
         
         # Update knowledge based on visibility
+        # MemoryItems wrap Event objects and track source_type (observation/hearsay)
         if visibility == "private":
-            # Only the actor knows
+            # Only the actor knows - they directly observed (performed) the action
             actor_agent = self._get_agent_by_id(actor)
             if actor_agent:
-                actor_agent.update_knowledge(event)
+                memory_item = MemoryItem(event, "observation")
+                actor_agent.update_knowledge(memory_item)
+                # Actor directly observes their own action, so update beliefs
+                actor_agent.update_belief(event, self)
         elif visibility == "witnessed":
-            # Actor and witnesses know
+            # Actor and witnesses directly observe the event
             actor_agent = self._get_agent_by_id(actor)
             if actor_agent:
-                actor_agent.update_knowledge(event)
+                # Actor directly observes their own action
+                memory_item = MemoryItem(event, "observation")
+                actor_agent.update_knowledge(memory_item)
+                # Actor directly observes their own action, so update beliefs
+                actor_agent.update_belief(event, self)
+            
             if witnesses:
                 for witness_id in witnesses:
                     witness_agent = self._get_agent_by_id(witness_id)
                     if witness_agent:
-                        witness_agent.update_knowledge(event)
+                        # Witness directly observes (sees) the event
+                        memory_item = MemoryItem(event, "observation")
+                        witness_agent.update_knowledge(memory_item)
                         witness_agent.update_belief(event, self)
                         # Update sus for NPCs when witnessing events like sabo (no world elimination)
                         if isinstance(witness_agent, NPC) and event.action == "sabo":
                             witness_agent.update_sus(event.actor, 0.2)  # Increase suspicion
         elif visibility == "public":
-            # All agents know
+            # All agents know, but observation vs hearsay differs
             for agent in self.get_alive_agents():
-                agent.update_knowledge(event)
+                if agent.id == actor:
+                    # Actor directly observes (performed) the action
+                    memory_item = MemoryItem(event, "observation")
+                else:
+                    # Others hear about it from the actor (hearsay)
+                    memory_item = MemoryItem(event, "hearsay", source_id=actor)
+                
+                agent.update_knowledge(memory_item)
                 agent.update_belief(event, self)
                 # Update sus for NPCs when witnessing events like sabo (no world elimination)
                 if isinstance(agent, NPC) and event.action == "sabo":
@@ -138,7 +164,7 @@ class World:
     
     def _get_agent_by_id(self, agent_id):
         """Get agent by id."""
-        if agent_id == self.player.id:
+        if self.player is not None and isinstance(self.player, Player) and agent_id == self.player.id:
             return self.player
         for npc in self.npcs:
             if npc.id == agent_id:
@@ -149,18 +175,71 @@ class World:
         """Get all alive agents at a given location."""
         return [a for a in self.get_alive_agents() if a.location == location]
     
+    def get_dead_agents_at_location(self, location):
+        """Get all dead agents (corpses) at a given location."""
+        return [a for a in self.get_all_agents() if a.state == "dead" and a.location == location]
+    
     def conduct_vote(self, reporter_id):
         """
         Conduct a vote after a report.
-        Everyone votes based on their most believed world.
+        All agents make statements in turn, then vote.
         Returns the agent id with most votes, or None if tie/no votes.
         Also updates beliefs based on voting results.
         """
+        from npc_policy import choose_statement
+        from actions import Actions
+        
         votes = {}
         alive_agents = self.get_alive_agents()
         
         print(f"\n=== VOTING (Reported by {reporter_id}) ===")
         
+        # Phase 1: All agents make statements in turn
+        print("\n--- Statements Phase ---")
+        print("All agents speak in turn:")
+        for agent in alive_agents:
+            if isinstance(agent, NPC):
+                # NPCs use choose_statement
+                statement = choose_statement(agent, self)
+                if statement:
+                    # NPC makes statement using SAY action
+                    Actions.say(self, agent, statement.predicate, statement.subject, statement.value)
+                    print(f"  {agent.id} says: {statement}")
+                else:
+                    print(f"  {agent.id} stays silent")
+            else:
+                # Player can make statement (interactive)
+                from agent import Player as PlayerClass
+                if isinstance(agent, PlayerClass):
+                    print(f"\n{agent.id}, do you want to make a statement? (y/n): ", end="")
+                    try:
+                        choice = input().strip().lower()
+                        if choice == 'y':
+                            print("Statement format: predicate subject value")
+                            print("  predicate: role | location | did")
+                            predicate = input("Predicate: ").strip().lower()
+                            if predicate in ["role", "location", "did"]:
+                                # Show available agents
+                                candidates = [a for a in alive_agents if a.id != agent.id]
+                                print("Available agents:")
+                                for i, a in enumerate(candidates):
+                                    print(f"  {i}: {a.id}")
+                                try:
+                                    subj_choice = int(input("Subject (agent number): "))
+                                    subject_id = candidates[subj_choice].id
+                                    value = input("Value: ").strip()
+                                    if value:
+                                        Actions.say(self, agent, predicate, subject_id, value)
+                                        print(f"  {agent.id} says: {predicate} {subject_id} {value}")
+                                except (ValueError, IndexError):
+                                    print("Invalid choice, skipping statement.")
+                        else:
+                            print(f"  {agent.id} stays silent")
+                    except (EOFError, KeyboardInterrupt):
+                        print(f"  {agent.id} stays silent")
+        
+        # Phase 2: All agents vote
+        print("\n--- Voting Phase ---")
         for agent in alive_agents:
             vote_target = agent.vote(self)
             if vote_target:
@@ -300,19 +379,12 @@ class World:
     def print_state(self):
         """Print current game state."""
         print(f"\n=== Turn {self.turn} (Time: {self.current_time:.1f}s) ===")
-        print(f"Player ({self.player.role}) in {self.player.location}, state: {self.player.state}, behavior: {self.player.behavior}")
+        if self.player is not None and isinstance(self.player, Player):
+            print(f"Player ({self.player.role}) in {self.player.location}, state: {self.player.state}, behavior: {self.player.behavior}")
         for npc in self.npcs:
             if npc.state == "alive":
-                any_world = npc.get_any_world()
                 next_action_in = max(0, npc.next_action_time - self.current_time)
-                if any_world:
-                    print(f"{npc.id} ({npc.role}) in {npc.location}, behavior: {npc.behavior}, next action in: {next_action_in:.1f}s")
-                    print(f"  Worlds: {len(npc.knowledge['worlds'])}, Example: {any_world}")
-                    print(f"  Sus: {npc.sus}")
-                else:
-                    print(f"{npc.id} ({npc.role}) in {npc.location}, behavior: {npc.behavior}, next action in: {next_action_in:.1f}s")
-                    print(f"  Worlds: 0")
-                    print(f"  Sus: {npc.sus}")
+                print(f"{npc.id} ({npc.role}) in {npc.location}, behavior: {npc.behavior}, next action in: {next_action_in:.1f}s")
             else:
                 print(f"{npc.id} - DEAD")
         print()

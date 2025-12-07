@@ -23,18 +23,26 @@ class Agent:
         # Worlds will be initialized by World._initialize_all_worlds()
         self.knowledge = {
             "worlds": [],  # possible worlds (belief states) - initialized by World
-            "memory": []   # sequence of events observed
+            "memory": []   # sequence of MemoryItems observed
         }
     
-    def update_knowledge(self, event):
-        """Add an event to the agent's memory."""
-        self.knowledge["memory"].append(event)
+    def update_knowledge(self, memory_item):
+        """
+        Add a MemoryItem to the agent's memory.
+        
+        Args:
+            memory_item: MemoryItem instance to add to memory
+        """
+        self.knowledge["memory"].append(memory_item)
     
     def update_belief(self, event, world):
         """
         Update belief based on observed event.
         Uses Kripke model to update possible worlds.
         Base implementation - can be overridden or not used by subclasses.
+        
+        Note: This still uses Event objects for belief updates (events contain visibility info),
+        but memory stores MemoryItem objects.
         """
         if not self.knowledge["worlds"]:
             # If no worlds initialized, don't update
@@ -68,6 +76,11 @@ class Agent:
             pass
         elif event.action == "report":
             # Reports provide information but don't eliminate worlds
+            pass
+        elif event.action == "say":
+            # Statements are soft evidence - DON'T eliminate worlds
+            # They only adjust belief weights or suspicion (handled elsewhere)
+            # Statement consistency checking could be added here in the future
             pass
     
     def _update_belief_uncertain(self, event, world):
@@ -200,9 +213,6 @@ class NPC(Agent):
         
         if not agent_scores:
             return None
-        
-        # Debug output
-        print(f"  {self.id} world counts: {agent_scores}, sus: {self.sus}")
         
         # Vote for agent with highest count
         max_score = max(agent_scores.values())

@@ -1,7 +1,20 @@
 from event import Event
+from statement import Statement
 
 class Actions:
-    """Shared action library for both Player and NPC."""
+    """
+    Shared action library for both Player and NPC.
+    
+    Actions are separated into:
+    - Instant Actions (produce events): ENTER, REPORT, KILL, SAY, SABO
+    - Behavior States (ongoing, no events): IDLE, TASK, SABO (ongoing), VOTING
+    """
+    
+    # Instant actions (produce events)
+    INSTANT_ACTIONS = ["enter", "report", "kill", "say", "sabo"]
+    
+    # Behavior states (modify behavior, no events)
+    BEHAVIOR_STATES = ["idle", "task", "voting"]
     
     @staticmethod
     def apply(world, agent, action_name, *args):
@@ -11,15 +24,16 @@ class Actions:
         Args:
             world: World instance
             agent: Agent instance (Player or NPC)
-            action_name: "enter" | "sabo" | "report" | "kill"
+            action_name: instant action or behavior state name
             *args: additional arguments for the action
         
         Returns:
-            Event object or None
+            Event object for instant actions, None for behavior states
         """
         if agent.state != "alive":
             return None
         
+        # Instant actions (produce events)
         if action_name == "enter":
             return Actions.enter(world, agent, *args)
         elif action_name == "sabo":
@@ -28,17 +42,26 @@ class Actions:
             return Actions.report(world, agent, *args)
         elif action_name == "kill":
             return Actions.kill(world, agent, *args)
+        elif action_name == "say":
+            return Actions.say(world, agent, *args)
+        
+        # Behavior states (no events, just modify behavior)
         elif action_name == "idle":
-            return Actions.idle(world, agent, *args)
+            return Actions.set_idle(world, agent, *args)
         elif action_name == "task":
-            return Actions.task(world, agent, *args)
+            return Actions.set_task(world, agent, *args)
+        elif action_name == "voting":
+            return Actions.set_voting(world, agent, *args)
+        
         else:
             return None
+    
+    # ========== Instant Actions (produce events) ==========
     
     @staticmethod
     def enter(world, agent, target_room):
         """
-        Move agent to target room.
+        ENTER instant action - Move agent to target room (produces event).
         
         Args:
             world: World instance
@@ -59,12 +82,22 @@ class Actions:
         event = world.create_event("enter", agent.id, target_room, witnesses, visibility)
         agent.action = "enter"
         agent.behavior = "idle"  # Entering a room resets to idle
+        
+        # Check for dead agents (corpses) at the new location
+        # Good agents should report when finding a dead agent
+        dead_agents = world.get_dead_agents_at_location(target_room)
+        if dead_agents and hasattr(agent, 'role') and agent.role == "good":
+            # Good agent found a corpse - will report in next action decision
+            # This is handled by npc_policy, but we could trigger it here if needed
+            pass
+        
         return event
     
     @staticmethod
     def sabo(world, agent, sabo_type=None):
         """
-        Perform sabotage action.
+        SABO instant action - Perform sabotage (produces event).
+        Also sets behavior state to "sabo" for ongoing sabotage.
         
         Args:
             world: World instance
@@ -80,13 +113,15 @@ class Actions:
         visibility = "witnessed" if witnesses else "private"
         event = world.create_event("sabo", agent.id, agent.location, witnesses, visibility)
         agent.action = "sabo"
+        # SABO can set behavior to "sabo" for ongoing sabotage
         agent.behavior = "sabo"
         return event
     
     @staticmethod
     def report(world, agent, info=None):
         """
-        Make a public report (triggers voting).
+        REPORT instant action - Make a public report (produces event, triggers voting).
+        If reporting a dead body, removes the corpse after reporting.
         
         Args:
             world: World instance
@@ -96,11 +131,19 @@ class Actions:
         Returns:
             Event object
         """
+        # Check if reporting a dead body at current location
+        dead_agents = world.get_dead_agents_at_location(agent.location)
+        
         # Reports are public announcements - triggers voting
         witnesses = [a.id for a in world.get_alive_agents() if a.id != agent.id]
         event = world.create_event("report", agent.id, agent.location, witnesses, "public")
         agent.action = "report"
-        agent.behavior = "voting"  # Report triggers voting
+        agent.behavior = "voting"  # Report triggers voting behavior state
+        
+        # If reporting a dead body, remove the corpse(s) to avoid duplicate reports
+        # Set location to None to represent body removal
+        for dead_agent in dead_agents:
+            dead_agent.location = None
         
         # Trigger voting after report (voted agent is already marked dead in conduct_vote)
         voted_out = world.conduct_vote(agent.id)
@@ -113,7 +156,7 @@ class Actions:
     @staticmethod
     def kill(world, agent, target_id):
         """
-        Kill target agent.
+        KILL instant action - Kill target agent (produces event).
         
         Args:
             world: World instance
@@ -149,26 +192,55 @@ class Actions:
         return event
     
     @staticmethod
-    def idle(world, agent, duration=None):
+    def say(world, agent, predicate, subject, value):
         """
-        Agent idles (does nothing).
+        SAY instant action - Agent makes a statement (produces public event).
         
         Args:
             world: World instance
             agent: Agent instance
-            duration: how long to idle (optional, random if not provided)
+            predicate: "role" | "location" | "did"
+            subject: agent_id that the statement is about
+            value: the value/claim (e.g., "bad", "Engine", "task")
         
         Returns:
-            None (no event created for idle)
+            Event object
         """
-        agent.action = "idle"
-        agent.behavior = "idle"
-        return None  # Idle doesn't create events
+        # Create Statement object
+        statement = Statement(predicate, subject, value, agent.id)
+        
+        # SAY produces a public event according to spec
+        witnesses = [a.id for a in world.get_alive_agents() if a.id != agent.id]
+        event = world.create_event("say", agent.id, agent.location, witnesses, "public", statement=statement)
+        agent.action = "say"
+        agent.behavior = "idle"  # After saying, reset to idle
+        return event
+    
+    # ========== Behavior States (do NOT produce events) ==========
     
     @staticmethod
-    def task(world, agent, duration=None):
+    def set_idle(world, agent, duration=None):
         """
-        Agent performs a task.
+        Set agent to idle behavior state.
+        Behavior states do NOT create events; they modify what instant actions can occur.
+        
+        Args:
+            world: World instance
+            agent: Agent instance
+            duration: how long to idle (optional)
+        
+        Returns:
+            None (behavior states don't create events)
+        """
+        agent.behavior = "idle"
+        agent.action = "idle"
+        return None
+    
+    @staticmethod
+    def set_task(world, agent, duration=None):
+        """
+        Set agent to task behavior state.
+        Behavior states do NOT create events; they modify what instant actions can occur.
         
         Args:
             world: World instance
@@ -176,8 +248,26 @@ class Actions:
             duration: how long the task takes (optional)
         
         Returns:
-            None (task doesn't create events, but updates behavior)
+            None (behavior states don't create events)
         """
-        agent.action = "task"
         agent.behavior = "task"
-        return None  # Task doesn't create events
+        agent.action = "task"
+        return None
+    
+    @staticmethod
+    def set_voting(world, agent, duration=None):
+        """
+        Set agent to voting behavior state.
+        Behavior states do NOT create events; they modify what instant actions can occur.
+        
+        Args:
+            world: World instance
+            agent: Agent instance
+            duration: how long voting lasts (optional)
+        
+        Returns:
+            None (behavior states don't create events)
+        """
+        agent.behavior = "voting"
+        agent.action = "voting"
+        return None
