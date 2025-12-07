@@ -1,5 +1,6 @@
 import time
 import random
+from memory import Certainty
 
 class Agent:
     """Base agent class with Kripke model knowledge representation."""
@@ -35,58 +36,155 @@ class Agent:
         """
         self.knowledge["memory"].append(memory_item)
     
-    def update_belief(self, event, world):
+    def update_belief(self, memory_item, world_context):
         """
-        Update belief based on observed event.
-        Uses Kripke model to update possible worlds.
-        Base implementation - can be overridden or not used by subclasses.
+        DEL Update Cycle: Update belief based on MemoryItem.
         
-        Note: This still uses Event objects for belief updates (events contain visibility info),
-        but memory stores MemoryItem objects.
+        Rigorously distinguishes between:
+        - Hard Knowledge (FACT, S5): Eliminates worlds
+        - Soft Belief (UNCERTAIN, KD45): Updates suspicion scores
+        
+        Args:
+            memory_item: MemoryItem instance wrapping an Event
+            world_context: World instance for context (needed for game state checks)
         """
         if not self.knowledge["worlds"]:
             # If no worlds initialized, don't update
             return
         
-        if event.visibility == "public":
-            # Public events are certain
-            self._update_belief_certain(event, world)
-        elif event.visibility == "witnessed" and self.id in event.witnesses:
-            # This agent witnessed the event
-            self._update_belief_certain(event, world)
-        elif event.visibility == "witnessed":
-            # Someone else witnessed it, but we might have indirect knowledge
-            self._update_belief_uncertain(event, world)
-        # Private events don't update beliefs (not observed)
+        event = memory_item.event
+        
+        # Branch based on certainty level
+        if memory_item.certainty == Certainty.FACT:
+            # Hard Knowledge: Perform World Elimination Update
+            self._update_belief_hard_knowledge(memory_item, world_context)
+        elif memory_item.certainty == Certainty.UNCERTAIN:
+            # Soft Belief: Update suspicion scores
+            self._update_belief_soft_belief(memory_item, world_context)
+        # VERIFIED and DISPROVED can be handled later if needed
     
-    def _update_belief_certain(self, event, world):
-        """Update belief when event is certain (public or witnessed by this agent)."""
+    def _update_belief_hard_knowledge(self, memory_item, world_context):
+        """
+        Hard Knowledge (FACT) branch: Eliminate inconsistent worlds.
+        S5 Knowledge: If I know it, it must be true in all possible worlds.
+        """
+        event = memory_item.event
+        
         if event.action == "kill":
-            # If we see a kill, the actor is definitely bad
-            # Eliminate all worlds where actor is not bad
+            # KILL (observed): Fact. Actor must be "bad".
+            # Eliminate all worlds where actor is "good"
+            if not self.knowledge["worlds"]:
+                return
+            
             worlds_to_keep = []
             for world_state in self.knowledge["worlds"]:
                 if world_state.get(event.actor) == "bad":
                     worlds_to_keep.append(world_state)
             self.knowledge["worlds"] = worlds_to_keep
-        elif event.action == "sabo":
-            # Sabotage: DON'T eliminate worlds, only sus gets updated
-            # (sus update happens in world.py when event is witnessed)
-            # No world elimination for sabo
+            
+        elif event.action == "enter":
+            # ENTER/VISIT (observed): Fact. Actor is at Location.
+            # Optional: Could track location history for future reasoning
+            # For now, this is informational only (no world elimination)
             pass
-        elif event.action == "report":
-            # Reports provide information but don't eliminate worlds
-            pass
-        elif event.action == "say":
-            # Statements are soft evidence - DON'T eliminate worlds
-            # They only adjust belief weights or suspicion (handled elsewhere)
-            # Statement consistency checking could be added here in the future
-            pass
+            
+        elif event.action == "vote_result":
+            # VOTE_RESULT (public): Fact.
+            voted_out_id = getattr(event, 'voted_out_id', None)
+            game_ended = getattr(event, 'game_ended', False)
+            votes = getattr(event, 'votes', {})
+            
+            if not voted_out_id:
+                return
+            
+            # If I was voted out and I know I'm good, eliminate worlds where voters are good
+            # (since good agents wouldn't vote out another good agent without strong reason)
+            if voted_out_id == self.id and self.role == "good":
+                # I know I'm good, so voters might be bad
+                if not self.knowledge["worlds"]:
+                    return
+                
+                # Start with current worlds and filter progressively for each voter
+                worlds_to_keep = list(self.knowledge["worlds"])
+                
+                for voter_id, vote_count in votes.items():
+                    if vote_count > 0:
+                        voter = world_context._get_agent_by_id(voter_id)
+                        if voter and voter.state == "alive":
+                            # Eliminate worlds where this voter is good
+                            # Filter from the current worlds_to_keep (progressive filtering)
+                            filtered_worlds = []
+                            for world_state in worlds_to_keep:
+                                if world_state.get(voter_id) != "good":
+                                    filtered_worlds.append(world_state)
+                            worlds_to_keep = filtered_worlds
+                            
+                            # If no worlds remain, stop filtering
+                            if not worlds_to_keep:
+                                break
+                
+                # Update worlds once after processing all voters
+                if worlds_to_keep:
+                    self.knowledge["worlds"] = worlds_to_keep
+            
+            # If X was voted out and game didn't end (and we know there's only 1 bad agent),
+            # then X must have been "good". Eliminate worlds where X is "bad".
+            elif not game_ended:
+                # If game continues after vote, voted agent was likely good
+                # Eliminate worlds where voted agent is bad
+                if not self.knowledge["worlds"]:
+                    return
+                
+                worlds_to_keep = []
+                for world_state in self.knowledge["worlds"]:
+                    if world_state.get(voted_out_id) == "good":
+                        worlds_to_keep.append(world_state)
+                
+                if worlds_to_keep:
+                    self.knowledge["worlds"] = worlds_to_keep
+        
+        # SABO and REPORT don't eliminate worlds directly
+        # (SABO updates sus, REPORT triggers voting)
     
-    def _update_belief_uncertain(self, event, world):
-        """Update belief when event is uncertain (witnessed by others but not us)."""
-        # For uncertain events, we might adjust beliefs but don't eliminate worlds
-        # This could be expanded later for more sophisticated reasoning
+    def _update_belief_soft_belief(self, memory_item, world_context):
+        """
+        Soft Belief (UNCERTAIN) branch: Update suspicion scores.
+        KD45 Belief: Adjust belief weights without eliminating worlds.
+        """
+        event = memory_item.event
+        
+        if event.action == "say" and event.statement:
+            # SAY (heard): Uncertain. Process statement content.
+            statement = event.statement
+            
+            # Only NPCs have sus tracking
+            if not hasattr(self, 'sus'):
+                return
+            
+            # If predicate is "role" and value is "bad", increase target's sus
+            if statement.predicate == "role" and statement.value == "bad":
+                target_id = statement.subject
+                speaker_id = statement.speaker
+                
+                # Slightly increase suspicion of the target
+                # Trust in speaker could be considered (future enhancement)
+                if target_id in self.sus and target_id != self.id:
+                    # Small sus increase for hearsay accusations
+                    self.update_sus(target_id, 0.1)
+        
+        elif event.action == "sabo":
+            # SABO (heard about): Increase suspicion of actor
+            if hasattr(self, 'sus'):
+                actor_id = event.actor
+                if actor_id in self.sus and actor_id != self.id:
+                    self.update_sus(actor_id, 0.2)
+    
+    def update_sus(self, agent_id, delta):
+        """
+        Update suspicion for an agent.
+        Base implementation - does nothing for base Agent class.
+        Overridden in NPC class.
+        """
         pass
     
     def get_any_world(self):
@@ -182,7 +280,7 @@ class NPC(Agent):
     
     def update_sus(self, agent_id, delta):
         """Update suspicion for an agent."""
-        if agent_id in self.sus:
+        if hasattr(self, 'sus') and agent_id in self.sus:
             self.sus[agent_id] += delta
             self.sus[agent_id] = max(0, self.sus[agent_id])  # Keep non-negative
     

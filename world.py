@@ -122,7 +122,7 @@ class World:
                 memory_item = MemoryItem(event, "observation")
                 actor_agent.update_knowledge(memory_item)
                 # Actor directly observes their own action, so update beliefs
-                actor_agent.update_belief(event, self)
+                actor_agent.update_belief(memory_item, self)
         elif visibility == "witnessed":
             # Actor and witnesses directly observe the event
             actor_agent = self._get_agent_by_id(actor)
@@ -131,7 +131,7 @@ class World:
                 memory_item = MemoryItem(event, "observation")
                 actor_agent.update_knowledge(memory_item)
                 # Actor directly observes their own action, so update beliefs
-                actor_agent.update_belief(event, self)
+                actor_agent.update_belief(memory_item, self)
             
             if witnesses:
                 for witness_id in witnesses:
@@ -140,10 +140,7 @@ class World:
                         # Witness directly observes (sees) the event
                         memory_item = MemoryItem(event, "observation")
                         witness_agent.update_knowledge(memory_item)
-                        witness_agent.update_belief(event, self)
-                        # Update sus for NPCs when witnessing events like sabo (no world elimination)
-                        if isinstance(witness_agent, NPC) and event.action == "sabo":
-                            witness_agent.update_sus(event.actor, 0.2)  # Increase suspicion
+                        witness_agent.update_belief(memory_item, self)
         elif visibility == "public":
             # All agents know, but observation vs hearsay differs
             for agent in self.get_alive_agents():
@@ -155,10 +152,7 @@ class World:
                     memory_item = MemoryItem(event, "hearsay", source_id=actor)
                 
                 agent.update_knowledge(memory_item)
-                agent.update_belief(event, self)
-                # Update sus for NPCs when witnessing events like sabo (no world elimination)
-                if isinstance(agent, NPC) and event.action == "sabo":
-                    agent.update_sus(event.actor, 0.2)  # Increase suspicion
+                agent.update_belief(memory_item, self)
         
         return event
     
@@ -260,66 +254,72 @@ class World:
             voted_out_id = winners[0]
             print(f"\nResult: {voted_out_id} is voted out with {max_votes} vote(s)!")
             
-            # Update beliefs based on voting
-            self._update_beliefs_after_vote(voted_out_id, votes)
+            # Get voted agent before marking dead
+            voted_agent = self._get_agent_by_id(voted_out_id)
+            if not voted_agent:
+                return voted_out_id
+            
+            # Check game state before marking dead
+            old_state = voted_agent.state
+            voted_agent.state = "dead"
+            game_ended = self.game_over()
+            
+            # Create vote_result event as public fact for all agents
+            # All agents (including the voted-out one) observe this as FACT
+            all_agents_for_event = [a for a in self.get_all_agents() 
+                                  if (a.state == "alive" or a.id == voted_out_id)]
+            location = (all_agents_for_event[0].location if all_agents_for_event 
+                       else voted_agent.location if voted_agent else "unknown")
+            
+            vote_result_event = Event(
+                action="vote_result",
+                actor=reporter_id,  # Reporter triggered the vote
+                location=location,
+                witnesses=[a.id for a in all_agents_for_event],
+                visibility="public"
+            )
+            # Add custom attributes for vote result
+            vote_result_event.voted_out_id = voted_out_id
+            vote_result_event.game_ended = game_ended
+            vote_result_event.votes = votes
+            
+            # Process vote result as public event (all agents observe it as FACT)
+            # Include voted agent so they can update beliefs about voters
+            for agent in all_agents_for_event:
+                memory_item = MemoryItem(vote_result_event, "observation")
+                agent.update_knowledge(memory_item)
+                agent.update_belief(memory_item, self)
+            
+            # Additional logic: if game not over and dead agents >= bad agents,
+            # eliminate worlds where all dead agents are bad
+            if not game_ended:
+                alive_agents = self.get_alive_agents()
+                dead_agents = [a for a in self.get_all_agents() if a.state == "dead"]
+                num_bad = sum(1 for a in alive_agents if a.role == "bad")
+                
+                if len(dead_agents) >= num_bad and num_bad > 0:
+                    # Eliminate worlds where all dead agents are bad
+                    for agent in alive_agents:
+                        if not agent.knowledge["worlds"]:
+                            continue
+                        
+                        worlds_to_keep = []
+                        for world_state in agent.knowledge["worlds"]:
+                            # Check if all dead agents are bad in this world
+                            all_dead_are_bad = all(
+                                world_state.get(dead_agent.id) == "bad" 
+                                for dead_agent in dead_agents
+                            )
+                            if not all_dead_are_bad:
+                                worlds_to_keep.append(world_state)
+                        
+                        if worlds_to_keep:
+                            agent.knowledge["worlds"] = worlds_to_keep
             
             return voted_out_id
         else:
             print(f"\nResult: Tie! No one is voted out.")
             return None
-    
-    def _update_beliefs_after_vote(self, voted_out_id, votes):
-        """
-        Update beliefs after voting:
-        1. If game not over and dead npc number >= bad agent number, eliminate worlds where all dead agents are bad
-        2. If I know my role is good and get voted by agent n, eliminate worlds where voter is good
-        """
-        voted_agent = self._get_agent_by_id(voted_out_id)
-        if not voted_agent:
-            return
-        
-        # Mark agent as dead
-        voted_agent.state = "dead"
-        
-        # Check if we should eliminate worlds (dead npc number >= bad agent number)
-        alive_agents = self.get_alive_agents()
-        dead_npcs = [npc for npc in self.npcs if npc.state == "dead"]
-        num_bad = sum(1 for a in alive_agents if a.role == "bad")
-        
-        if len(dead_npcs) >= num_bad and num_bad > 0:
-            # Eliminate worlds where all dead agents are bad
-            for agent in self.get_alive_agents():
-                if not agent.knowledge["worlds"]:
-                    continue
-                
-                worlds_to_keep = []
-                for world_state in agent.knowledge["worlds"]:
-                    # Check if all dead NPCs are bad in this world
-                    all_dead_are_bad = all(
-                        world_state.get(dead_npc.id) == "bad" 
-                        for dead_npc in dead_npcs
-                    )
-                    if not all_dead_are_bad:
-                        worlds_to_keep.append(world_state)
-                
-                if worlds_to_keep:
-                    agent.knowledge["worlds"] = worlds_to_keep
-        
-        # If I know my role is good and get voted by agent n, eliminate worlds where voter is good
-        if voted_agent.role == "good":
-            # The voted-out agent knows they're good, so voters might be bad
-            for voter_id, vote_count in votes.items():
-                if vote_count > 0:
-                    voter = self._get_agent_by_id(voter_id)
-                    if voter and voter.state == "alive":
-                        # Update beliefs: eliminate worlds where voter is good
-                        if voted_agent.knowledge["worlds"]:
-                            worlds_to_keep = []
-                            for world_state in voted_agent.knowledge["worlds"]:
-                                if world_state.get(voter_id) != "good":
-                                    worlds_to_keep.append(world_state)
-                            if worlds_to_keep:
-                                voted_agent.knowledge["worlds"] = worlds_to_keep
     
     def update_npcs(self, delta_time=0.1):
         """
