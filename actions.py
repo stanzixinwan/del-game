@@ -7,7 +7,7 @@ class Actions:
     
     Actions are separated into:
     - Instant Actions (produce events): ENTER, REPORT, KILL, SAY, SABO
-    - Behavior States (ongoing, no events): IDLE, TASK, SABO (ongoing), VOTING
+    - Behavior States (ongoing, no events): IDLE, TASK, VOTING
     """
     
     # Instant actions (produce events)
@@ -72,7 +72,9 @@ class Actions:
         Returns:
             Event object or None (if invalid room or not connected)
         """
-        if target_room not in world.rooms:
+        # Check if room exists (handle both dict and list for backward compatibility)
+        room_names = list(world.rooms.keys()) if isinstance(world.rooms, dict) else world.rooms
+        if target_room not in room_names:
             return None
         
         # Check if target room is connected to current location
@@ -81,7 +83,17 @@ class Actions:
             # Not directly connected - movement not allowed
             return None
         
+        # Update room tracking before moving
+        old_location = agent.location
+        if old_location and old_location in world.rooms:
+            world.rooms[old_location].remove_agent(agent)
+        
         agent.location = target_room
+        
+        # Update room tracking after moving
+        if target_room in world.rooms:
+            world.rooms[target_room].add_agent(agent)
+        
         # Movement is witnessed by agents at destination
         witnesses = [a.id for a in world.get_agents_at_location(target_room) 
                     if a.id != agent.id]
@@ -104,7 +116,6 @@ class Actions:
     def sabo(world, agent, sabo_type=None):
         """
         SABO instant action - Perform sabotage (produces event).
-        Also sets behavior state to "sabo" for ongoing sabotage.
         
         Args:
             world: World instance
@@ -120,8 +131,7 @@ class Actions:
         visibility = "witnessed" if witnesses else "private"
         event = world.create_event("sabo", agent.id, agent.location, witnesses, visibility)
         agent.action = "sabo"
-        # SABO can set behavior to "sabo" for ongoing sabotage
-        agent.behavior = "sabo"
+        agent.behavior = "idle"  # Reset to idle after sabotage action
         return event
     
     @staticmethod
@@ -150,6 +160,9 @@ class Actions:
         # If reporting a dead body, remove the corpse(s) to avoid duplicate reports
         # Set location to None to represent body removal
         for dead_agent in dead_agents:
+            # Remove from room tracking
+            if dead_agent.location and dead_agent.location in world.rooms:
+                world.rooms[dead_agent.location].remove_agent(dead_agent)
             dead_agent.location = None
         
         # Trigger voting after report (voted agent is already marked dead in conduct_vote)
@@ -186,6 +199,11 @@ class Actions:
         # Kill the target
         target.state = "dead"
         agent.action = "kill"
+        
+        # Update room tracking (target is now dead, should be in dead_agents)
+        if target.location and target.location in world.rooms:
+            world.rooms[target.location].remove_agent(target)
+            world.rooms[target.location].add_agent(target)  # Re-add as dead agent
         
         # If kill was witnessed, agent is caught
         if witnesses:

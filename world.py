@@ -1,6 +1,7 @@
 from agent import Agent, NPC, Player
 from event import Event
 from memory import MemoryItem
+from room import Room
 import time
 import random
 
@@ -22,14 +23,23 @@ class World:
         if seed is not None:
             random.seed(seed)
         
-        # Set rooms
-        self.rooms = rooms
-        
-        # Initialize location connections (graph)
+        # Initialize Room objects
         if connections is not None:
+            # Create Room objects with provided connections
+            self.rooms = {name: Room(name, connections.get(name, [])) for name in rooms}
+            # Ensure bidirectional connections
+            for room_name, room in self.rooms.items():
+                for connected_name in room.connected_rooms:
+                    if connected_name in self.rooms:
+                        if not self.rooms[connected_name].is_connected_to(room_name):
+                            self.rooms[connected_name].add_connection(room_name)
+            # Keep connections dict for backward compatibility
             self.connections = connections
         else:
-            self.connections = self._initialize_default_connections()
+            # Create Room objects with default connections
+            self.rooms = self._initialize_rooms(rooms)
+            # Build connections dict from Room objects for backward compatibility
+            self.connections = {name: room.get_connected_rooms() for name, room in self.rooms.items()}
         
         # Set player (can be None for simulation mode with all NPCs)
         if player is not None:
@@ -37,14 +47,19 @@ class World:
         elif player is False:  # Explicit False means no player
             self.player = None
         else:
-            self.player = Player("player", role="bad", location=self.rooms[0] if self.rooms else "Storage")
+            initial_location = list(self.rooms.keys())[0] if self.rooms else "Storage"
+            self.player = Player("player", role="bad", location=initial_location)
         
         # Set NPCs
         if npcs is not None:
             self.npcs = npcs
         else:
             # Create NPCs with random locations from available rooms
-            self.npcs = [NPC(f"npc{i}", role="good", location=random.choice(self.rooms)) for i in range(num_npcs)]
+            room_names = list(self.rooms.keys())
+            self.npcs = [NPC(f"npc{i}", role="good", location=random.choice(room_names)) for i in range(num_npcs)]
+        
+        # Register all agents with their rooms
+        self._register_agents_in_rooms()
         
         self.result = None
         self.turn = 0
@@ -56,53 +71,64 @@ class World:
         self._initialize_sus()
         self._initialize_npc_times()
     
-    def _initialize_default_connections(self):
+    def _initialize_rooms(self, room_names):
         """
-        Initialize default connections between rooms.
-        Creates a connected graph where not all rooms are directly connected.
+        Initialize Room objects with default connections.
         
-        Default layout for 4 rooms (A, B, C, D):
-        A -- B
-        |    |
-        C -- D
+        Args:
+            room_names: list of room name strings
         
         Returns:
-            dict mapping room name -> list of connected room names
+            dict mapping room name -> Room object
         """
+        # First create connections dict using old logic
         connections = {}
-        
-        if len(self.rooms) == 4:
-            # Create a 2x2 grid layout
-            a, b, c, d = self.rooms[0], self.rooms[1], self.rooms[2], self.rooms[3]
+        if len(room_names) == 4:
+            a, b, c, d = room_names[0], room_names[1], room_names[2], room_names[3]
             connections = {
-                a: [b, c],  # A connected to B and C
-                b: [a, d],  # B connected to A and D
-                c: [a, d],  # C connected to A and D
-                d: [b, c]   # D connected to B and C
+                a: [b, c],
+                b: [a, d],
+                c: [a, d],
+                d: [b, c]
             }
-        elif len(self.rooms) == 2:
-            # Simple connection between two rooms
+        elif len(room_names) == 2:
             connections = {
-                self.rooms[0]: [self.rooms[1]],
-                self.rooms[1]: [self.rooms[0]]
+                room_names[0]: [room_names[1]],
+                room_names[1]: [room_names[0]]
             }
-        elif len(self.rooms) >= 3:
-            # Create a chain with some cross-connections
-            connections = {room: [] for room in self.rooms}
-            # Chain connections
-            for i in range(len(self.rooms) - 1):
-                connections[self.rooms[i]].append(self.rooms[i + 1])
-                connections[self.rooms[i + 1]].append(self.rooms[i])
-            # Add some cross-connections for 3+ rooms
-            if len(self.rooms) >= 3:
-                # Connect first to last to create a ring
-                connections[self.rooms[0]].append(self.rooms[-1])
-                connections[self.rooms[-1]].append(self.rooms[0])
+        elif len(room_names) >= 3:
+            connections = {room: [] for room in room_names}
+            for i in range(len(room_names) - 1):
+                connections[room_names[i]].append(room_names[i + 1])
+                connections[room_names[i + 1]].append(room_names[i])
+            if len(room_names) >= 3:
+                connections[room_names[0]].append(room_names[-1])
+                connections[room_names[-1]].append(room_names[0])
         else:
-            # Single room or empty - no connections needed
-            connections = {room: [] for room in self.rooms}
+            connections = {room: [] for room in room_names}
         
-        return connections
+        # Create Room objects with connections
+        rooms = {name: Room(name, connections.get(name, [])) for name in room_names}
+        return rooms
+    
+    def _register_agents_in_rooms(self):
+        """Register all agents with their current rooms."""
+        for agent in self.get_all_agents():
+            if agent.location and agent.location in self.rooms:
+                self.rooms[agent.location].add_agent(agent)
+    
+    def _update_room_agents(self):
+        """Update Room objects to reflect current agent locations."""
+        # Clear all rooms
+        for room in self.rooms.values():
+            room.agents = []
+            room.dead_agents = []
+        
+        # Add agents to their current rooms
+        for agent in self.get_all_agents():
+            if agent.location and agent.location in self.rooms:
+                self.rooms[agent.location].add_agent(agent)
+    
     
     def are_connected(self, room1, room2):
         """
@@ -115,9 +141,12 @@ class World:
         Returns:
             True if rooms are directly connected, False otherwise
         """
-        if room1 not in self.connections:
-            return False
-        return room2 in self.connections[room1]
+        # Use Room object if available, fallback to connections dict
+        if room1 in self.rooms:
+            return self.rooms[room1].is_connected_to(room2)
+        if hasattr(self, 'connections') and room1 in self.connections:
+            return room2 in self.connections[room1]
+        return False
     
     def get_connected_rooms(self, room):
         """
@@ -129,7 +158,12 @@ class World:
         Returns:
             List of connected room names, empty list if room not found
         """
-        return self.connections.get(room, [])
+        # Use Room object if available, fallback to connections dict
+        if room in self.rooms:
+            return self.rooms[room].get_connected_rooms()
+        if hasattr(self, 'connections'):
+            return self.connections.get(room, [])
+        return []
     
     def _initialize_all_worlds(self):
         """Initialize all possible worlds for each agent (all cases of 1 bad agent)."""
@@ -249,10 +283,18 @@ class World:
     
     def get_agents_at_location(self, location):
         """Get all alive agents at a given location."""
+        # Use Room object if available
+        if location in self.rooms:
+            return self.rooms[location].get_agents(alive_only=True)
+        # Fallback to old method
         return [a for a in self.get_alive_agents() if a.location == location]
     
     def get_dead_agents_at_location(self, location):
         """Get all dead agents (corpses) at a given location."""
+        # Use Room object if available
+        if location in self.rooms:
+            return self.rooms[location].get_dead_agents()
+        # Fallback to old method
         return [a for a in self.get_all_agents() if a.state == "dead" and a.location == location]
     
     def conduct_vote(self, reporter_id):

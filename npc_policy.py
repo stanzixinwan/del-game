@@ -150,10 +150,6 @@ def _choose_action_bad(npc, world):
         if target.role == "good":  
             return ("kill", target.id)
     
-    # 2. Occasionally sabotage
-    if len(agents_at_location) == 0: 
-        return ("sabo", None)
-    
     # 3. Move or task (blend in)
     if random.random() < 0.3:
         if random.random() < 0.5:

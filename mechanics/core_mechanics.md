@@ -7,7 +7,7 @@
 - REPORT(info)
 - KILL(agent)
 - SAY(statement)
-- SABO(trigger)
+- SABO()
 → These create events and trigger belief updates.
 
 if **Kill** happens, the killed agent state is 'dead', and stays in that location, to represent corpse. After some agent find it and report, the player's location is then set to none/unknown(whichever makes more sense), means the body has been removed to avoid duplicate report.
@@ -15,7 +15,6 @@ if **Kill** happens, the killed agent state is 'dead', and stays in that locatio
 ### Behavior States (ongoing)
 - IDLE
 - TASK
-- SABO (ongoing sabotage)
 - VOTING
 → These do NOT create events; they modify what instant actions can occur.
 
@@ -61,7 +60,7 @@ In voting phase:
 - action
 - knowledge
 
-agent.behavior = idle | task | sabo | voting
+agent.behavior = idle | task | voting
 once an agent takes action, its behavior state updates
 
 ## NPC

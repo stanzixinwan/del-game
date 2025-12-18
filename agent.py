@@ -19,7 +19,7 @@ class Agent:
         self.role = role
         self.location = location
         self.action = None  # current action being performed
-        self.behavior = "idle"  # "idle" | "task" | "sabo" | "voting"
+        self.behavior = "idle"  # "idle" | "task" | "voting"
         # Kripke Model: Knowledge representation
         # Worlds will be initialized by World._initialize_all_worlds()
         self.knowledge = {
