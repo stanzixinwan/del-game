@@ -28,10 +28,12 @@ Each agent's knowledge consists of:
 #### World Initialization
 
 At game start, each agent initializes with all possible worlds where:
-- Exactly one agent is "bad" (the impostor)
+- The correct number of agents are "bad" (e.g., 2 bad agents in a 8-agent game)
 - The agent's own role matches their actual role (they know themselves)
+- **Good agents**: Consider all possible combinations of bad agents among others
+- **Bad agents**: Know all bad agent identities (perfect knowledge of their team)
 
-**Example**: With 4 agents (1 bad, 3 good), each good agent starts with 3 possible worlds (one where each other agent could be bad). The bad agent starts with 1 world (where they are bad).
+**Example**: With 8 agents (2 bad, 6 good), each good agent starts with C(6,2) = 15 possible worlds (all combinations of 2 bad agents from the other 6). Each bad agent starts with 1 world (where they know all bad agent identities).
 
 ### Dynamic Epistemic Logic (DEL) Update Cycle
 
@@ -46,7 +48,9 @@ When an agent receives information with `Certainty.FACT`:
 - **Example**: Seeing a KILL action → eliminate all worlds where the killer is "good"
 
 **Event Handlers (FACT)**:
-- **KILL (observed)**: Actor must be "bad" → eliminate worlds where actor is "good"
+- **KILL (observed/witnessed)**: Actor must be "bad" → eliminate worlds where actor is "good"
+  - When a kill is witnessed, witnesses receive FACT knowledge (hard belief update)
+  - Game continues (no immediate game over) - witnesses use this knowledge in future decisions
 - **VOTE_RESULT (public)**: 
   - If game continues after vote → voted agent was "good" → eliminate worlds where they're "bad"
   - If I was voted out and I'm good → voters might be "bad" → eliminate worlds where voters are "good"
@@ -96,13 +100,28 @@ Branch on Certainty:
 
 ### Statement System
 
-Agents can make formal logical statements during the voting phase:
+Agents can make formal logical statements during the meeting phase:
 
 - **Predicates**: `"role"`, `"location"`, `"did"`
 - **Format**: `SAY(predicate, subject, value)`
 - **Example**: `SAY("role", "npc1", "bad")` → "I claim npc1's role is bad"
 
 Statements are treated as **soft evidence** (UNCERTAIN) and do not eliminate worlds directly. They influence suspicion scores and can be evaluated for consistency with observed facts.
+
+### Game State Machine
+
+The game operates in two distinct phases:
+
+- **`PHASE_PLAYING`**: Normal gameplay phase where agents move, perform actions, and interact
+- **`PHASE_MEETING`**: Meeting/voting phase where agents gather, make statements, and vote
+
+**Meeting System**:
+- Meetings are automatically triggered every 10 seconds of playing time
+- Meetings can also be triggered by agents reporting dead bodies
+- During meetings, all agents are teleported to the **meeting room (Room E)**
+- Room E is isolated and not connected to other rooms
+- After meetings, agents return to their original locations
+- Meeting time does not count towards simulation time (time is paused during meetings)
 
 ## Key Components
 
@@ -142,6 +161,18 @@ After voting:
    - If I was voted out and I'm good → eliminate worlds where my voters are "good"
 3. Additional logic: If enough agents are dead, eliminate worlds where all dead agents are "bad" (contradicts game state)
 
+### Meeting Room System
+
+- **Room E** serves as the dedicated meeting room
+- Room E is **isolated** (not connected to any other rooms)
+- Agents start in rooms A-D only
+- When a meeting starts:
+  - All agents are teleported to Room E
+  - Original locations are stored
+- When a meeting ends:
+  - All agents return to their original locations
+  - Agents resume normal gameplay in their previous rooms
+
 ## Implementation Highlights
 
 ### Robust World Filtering
@@ -159,42 +190,48 @@ After voting:
 
 ## Quick Start
 
-### Player Mode
+### Simulation Mode
+
+The game runs in simulation mode with all NPCs:
 
 ```bash
-python main.py
-# Choose mode 1
+python visualizer.py
 ```
 
-### Simulation Mode (All NPCs)
-
-```bash
-python main.py
-# Choose mode 2
-```
+**Current Configuration**:
+- **6 good agents** and **2 bad agents** (8 total NPCs)
+- **5 rooms**: A, B, C, D, and E (meeting room)
+- **Room connectivity**: A-B, A-C, B-D, C-D (E is isolated)
+- **Automatic meetings**: Every 10 seconds of playing time
+- **Meeting room**: Room E (isolated, agents teleport here during meetings)
 
 ## Architecture Overview
 
 ```
-main.py
-  └─ World (game state, event creation)
+visualizer.py
+  └─ World (game state, event creation, state machine)
+      ├─ GamePhase.PHASE_PLAYING (normal gameplay)
+      ├─ GamePhase.PHASE_MEETING (meeting/voting phase)
       ├─ Agent.update_knowledge() [Store MemoryItem]
       ├─ Agent.update_belief() [DEL Update Cycle]
       │   ├─ Hard Knowledge (FACT) → World Elimination
       │   └─ Soft Belief (UNCERTAIN) → Sus Update
       └─ NPC Policy (action selection)
           ├─ choose_action() [Non-verbal actions]
-          └─ choose_statement() [Verbal actions in voting]
+          ├─ choose_statement() [Verbal actions in meetings]
+          └─ choose_vote() [Voting decisions]
 ```
 
 ## Core Files
 
 - **`agent.py`**: Agent class with Kripke model and DEL update cycle
-- **`world.py`**: World state, event creation, world initialization
+- **`world.py`**: World state, event creation, state machine (PHASE_PLAYING/PHASE_MEETING), meeting system
+- **`visualizer.py`**: PyGame visualization and main simulation loop
 - **`memory.py`**: `MemoryItem` and `Certainty` enum
 - **`statement.py`**: Formal statement system for SAY actions
-- **`npc_policy.py`**: Role-specific NPC decision making
+- **`npc_policy.py`**: Role-specific NPC decision making (actions, statements, votes)
 - **`actions.py`**: Shared action library (instant actions + behavior states)
+- **`room.py`**: Room class for managing locations and agent tracking
 - **`mechanics/`**: Design documentation
 
 ## Design Philosophy
