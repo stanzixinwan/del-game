@@ -155,21 +155,23 @@ class Actions:
         witnesses = [a.id for a in world.get_alive_agents() if a.id != agent.id]
         event = world.create_event("report", agent.id, agent.location, witnesses, "public")
         agent.action = "report"
-        agent.behavior = "voting"  # Report triggers voting behavior state
+
         
         # If reporting a dead body, remove the corpse(s) to avoid duplicate reports
         # Set location to None to represent body removal
         for dead_agent in dead_agents:
+            # Store location before removal to ensure correct room reference
+            corpse_location = dead_agent.location
             # Remove from room tracking
-            if dead_agent.location and dead_agent.location in world.rooms:
-                world.rooms[dead_agent.location].remove_agent(dead_agent)
+            if corpse_location and corpse_location in world.rooms:
+                world.rooms[corpse_location].remove_agent(dead_agent)
+            # Set location to None to mark corpse as removed
             dead_agent.location = None
         
-        # Trigger voting after report (voted agent is already marked dead in conduct_vote)
-        voted_out = world.conduct_vote(agent.id)
-        
-        # After voting, reset behavior
-        agent.behavior = "idle"
+        # Trigger voting after report (now async - starts meeting phase)
+        world.start_meeting(agent.id)
+        # Note: behavior will remain "voting" during meeting phase
+        # It will be reset to "idle" when meeting completes (handled in update_meeting)
         
         return event
     

@@ -268,7 +268,7 @@ class Player(Agent):
 
 
 class NPC(Agent):
-    """NPC agent (typically good role, can observe and make decisions)."""
+    """NPC agent."""
     
     def __init__(self, id, role="good", location="Entrance"):
         super().__init__(id, role, location)
@@ -287,58 +287,11 @@ class NPC(Agent):
     
     def vote(self, world):
         """
-        Good agents vote: for every other id, count worlds where id_role=bad.
-        Vote for the one with the largest count.
-        If tie, use sus values.
+        NPC voting - delegates to npc_policy for role-specific voting logic.
+        Returns the id of the agent to vote for (or None to skip).
         """
-        if self.role != "good":
-            return super().vote(world)  # Fallback to base implementation
-        
-        # Count worlds where each agent is bad
-        agent_scores = {}
-        all_agents = world.get_all_agents()
-        
-        for agent in all_agents:
-            if agent.id == self.id or agent.state != "alive":
-                continue
-            
-            # Count worlds where this agent is bad
-            count = 0
-            for world_state in self.knowledge["worlds"]:
-                if world_state.get(agent.id) == "bad":
-                    count += 1
-            
-            agent_scores[agent.id] = count
-        
-        if not agent_scores:
-            return None
-        
-        # Vote for agent with highest count
-        max_score = max(agent_scores.values())
-        if max_score > 0:
-            # Find agent(s) with max score
-            candidates = [aid for aid, score in agent_scores.items() if score == max_score]
-            if len(candidates) == 1:
-                return candidates[0]
-            elif len(candidates) > 1:
-                # Tie: compare sus values
-                best_candidate = None
-                max_sus = -1
-                sus_values = [self.sus.get(cid, 0) for cid in candidates]
-                for candidate_id in candidates:
-                    sus_value = self.sus.get(candidate_id, 0)
-                    if sus_value > max_sus:
-                        max_sus = sus_value
-                        best_candidate = candidate_id
-                
-                # Only return best_candidate if there's a unique max sus > 0
-                # If all sus are equal (including all 0), skip vote
-                if max_sus > 0 and sus_values.count(max_sus) == 1:
-                    return best_candidate
-                # If all sus are equal (all 0 or all same), skip vote
-                return None
-        
-        return None
+        from npc_policy import choose_vote
+        return choose_vote(self, world)
     
     def decide_action(self, world):
         """

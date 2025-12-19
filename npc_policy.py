@@ -4,11 +4,14 @@ NPC Policy Design (Role-Specific)
 This module handles NPC decision-making logic with role-specific policies.
 It separates good and bad agent behavior, and handles both non-verbal actions
 and verbal actions (statements) during voting phase.
+
+NOTE: All functions in this module are designed exclusively for NPC instances.
+They will raise TypeError if called with non-NPC agents.
 """
 
 import random
 from statement import Statement
-from agent import Player as PlayerClass
+from agent import Player as PlayerClass, NPC
 
 
 def choose_action(npc, world):
@@ -21,13 +24,20 @@ def choose_action(npc, world):
     - Bad agents: kill, sabotage, etc.
     
     Args:
-        npc: NPC instance
+        npc: NPC instance (must be an NPC, not Player or base Agent)
         world: World instance (game state)
     
     Returns:
         ("action", args) tuple or None
         Examples: ("report", None), ("enter", "Engine"), ("task", None), ("idle", None)
+    
+    Raises:
+        TypeError: if npc is not an NPC instance
     """
+    # Type check: ensure this is an NPC instance
+    if not isinstance(npc, NPC):
+        raise TypeError(f"choose_action() requires an NPC instance, got {type(npc).__name__}")
+    
     # Route to role-specific policy
     if npc.role == "good":
         return _choose_action_good(npc, world)
@@ -40,16 +50,23 @@ def choose_action(npc, world):
 
 def _choose_action_good(npc, world):
     """
-    Action policy for good agents.
+    Action policy for good NPC agents.
     
-    Good agents:
+    Good NPCs:
     - Report when entering a location and finding a dead agent (corpse)
     - Report when they identify a bad agent (worlds <= threshold)
     - Move closer to suspicious agents
     - Do tasks
     - Move around
     - Idle
+    
+    Args:
+        npc: NPC instance (must be good role)
+        world: World instance (game state)
     """
+    # Ensure this is an NPC with sus tracking
+    if not isinstance(npc, NPC) or not hasattr(npc, 'sus'):
+        return ("idle", None)
     # 1. If entering a location and finding a dead agent, report immediately
     # According to npc_policy.md: "report when one enters a location and find a dead agent"
     dead_agents = world.get_dead_agents_at_location(npc.location)
@@ -128,14 +145,21 @@ def _choose_action_good(npc, world):
 
 def _choose_action_bad(npc, world):
     """
-    Action policy for bad agents.
+    Action policy for bad NPC agents.
     
-    Bad agents:
+    Bad NPCs:
     - Kill when opportunity arises (same location, no witnesses)
     - Sabotage to create chaos
     - Move strategically
     - Blend in (task/idle)
+    
+    Args:
+        npc: NPC instance (must be bad role)
+        world: World instance (game state)
     """
+    # Ensure this is an NPC
+    if not isinstance(npc, NPC):
+        return ("idle", None)
     # For now, bad NPCs use a simple strategy
     # TODO: Implement more sophisticated bad agent behavior
     
@@ -174,12 +198,19 @@ def choose_statement(npc, world):
     - claim innocence: SAY("did", self, "task")
     
     Args:
-        npc: NPC instance
+        npc: NPC instance (must be an NPC, not Player or base Agent)
         world: World instance (game state)
     
     Returns:
         Statement object or None if the NPC stays silent
+    
+    Raises:
+        TypeError: if npc is not an NPC instance
     """
+    # Type check: ensure this is an NPC instance
+    if not isinstance(npc, NPC):
+        raise TypeError(f"choose_statement() requires an NPC instance, got {type(npc).__name__}")
+    
     # Route to role-specific statement policy
     if npc.role == "good":
         return _choose_statement_good(npc, world)
@@ -191,13 +222,20 @@ def choose_statement(npc, world):
 
 def _choose_statement_good(npc, world):
     """
-    Statement policy for good agents during voting phase.
+    Statement policy for good NPC agents during voting phase.
     
-    Good agents can:
+    Good NPCs can:
     - Accuse: SAY("role", target, "bad") when they have evidence
     - Defend: SAY("location", self, last_location) if accused
     - Claim innocence: SAY("did", self, "task")
+    
+    Args:
+        npc: NPC instance (must be good role with sus tracking)
+        world: World instance (game state)
     """
+    # Ensure this is an NPC with sus tracking
+    if not isinstance(npc, NPC) or not hasattr(npc, 'sus'):
+        return None
     # Check if NPC is being accused (high sus from others)
     # For now, use a simple heuristic: if we have a strong suspect, accuse them
     if npc.knowledge["worlds"]:
@@ -258,14 +296,21 @@ def _choose_statement_good(npc, world):
 
 def _choose_statement_bad(npc, world):
     """
-    Statement policy for bad agents during voting phase.
+    Statement policy for bad NPC agents during voting phase.
     
-    Bad agents can:
+    Bad NPCs can:
     - Accuse others (deflection)
     - Defend themselves
     - Claim innocence
     - Lie about their actions
+    
+    Args:
+        npc: NPC instance (must be bad role)
+        world: World instance (game state)
     """
+    # Ensure this is an NPC
+    if not isinstance(npc, NPC):
+        return None
     alive_agents = world.get_alive_agents()
     good_agents = [a for a in alive_agents if a.role == "good" and a.id != npc.id]
     
@@ -288,3 +333,149 @@ def _choose_statement_bad(npc, world):
     
     # Stay silent otherwise
     return None
+
+
+def choose_vote(npc, world):
+    """
+    Decide who the NPC votes for during voting phase.
+    
+    Role-specific voting strategies:
+    - Good NPCs: Vote based on possible worlds (count worlds where agent is bad)
+    - Bad NPCs: Vote strategically to avoid suspicion, rarely vote for themselves
+    
+    Args:
+        npc: NPC instance (must be an NPC, not Player or base Agent)
+        world: World instance (game state)
+    
+    Returns:
+        Agent ID to vote for, or None to skip vote
+    
+    Raises:
+        TypeError: if npc is not an NPC instance
+    """
+    # Type check: ensure this is an NPC instance
+    if not isinstance(npc, NPC):
+        raise TypeError(f"choose_vote() requires an NPC instance, got {type(npc).__name__}")
+    
+    # Route to role-specific voting policy
+    if npc.role == "good":
+        return _choose_vote_good(npc, world)
+    elif npc.role == "bad":
+        return _choose_vote_bad(npc, world)
+    else:
+        return None
+
+
+def _choose_vote_good(npc, world):
+    """
+    Voting policy for good NPC agents.
+    
+    Good NPCs vote based on:
+    - Count worlds where each agent is bad
+    - Vote for agent with highest count
+    - Use sus values to break ties
+    
+    Args:
+        npc: NPC instance (must be good role with sus tracking)
+        world: World instance (game state)
+    
+    Returns:
+        Agent ID to vote for, or None to skip vote
+    """
+    # Ensure this is an NPC with sus tracking
+    if not isinstance(npc, NPC) or not hasattr(npc, 'sus'):
+        return None
+    
+    # Count worlds where each agent is bad
+    agent_scores = {}
+    all_agents = world.get_all_agents()
+    
+    for agent in all_agents:
+        if agent.id == npc.id or agent.state != "alive":
+            continue
+        
+        # Count worlds where this agent is bad
+        count = 0
+        for world_state in npc.knowledge["worlds"]:
+            if world_state.get(agent.id) == "bad":
+                count += 1
+        
+        agent_scores[agent.id] = count
+    
+    if not agent_scores:
+        return None
+    
+    # Vote for agent with highest count
+    max_score = max(agent_scores.values())
+    if max_score > 0:
+        # Find agent(s) with max score
+        candidates = [aid for aid, score in agent_scores.items() if score == max_score]
+        if len(candidates) == 1:
+            return candidates[0]
+        elif len(candidates) > 1:
+            # Tie: compare sus values
+            best_candidate = None
+            max_sus = -1
+            sus_values = [npc.sus.get(cid, 0) for cid in candidates]
+            for candidate_id in candidates:
+                sus_value = npc.sus.get(candidate_id, 0)
+                if sus_value > max_sus:
+                    max_sus = sus_value
+                    best_candidate = candidate_id
+            
+            # Only return best_candidate if there's a unique max sus > 0
+            # If all sus are equal (including all 0), skip vote
+            if max_sus > 0 and sus_values.count(max_sus) == 1:
+                return best_candidate
+            # If all sus are equal (all 0 or all same), skip vote
+            return None
+    
+    return None
+
+
+def _choose_vote_bad(npc, world):
+    """
+    Voting policy for bad NPC agents.
+    
+    Bad NPCs vote strategically:
+    - Avoid voting for themselves (mostly)
+    - Vote for good agents to eliminate them
+    - May vote randomly to avoid patterns
+    - Rarely vote for themselves (only if no other option)
+    
+    Args:
+        npc: NPC instance (must be bad role)
+        world: World instance (game state)
+    
+    Returns:
+        Agent ID to vote for, or None to skip vote
+    """
+    # Ensure this is an NPC
+    if not isinstance(npc, NPC):
+        return None
+    
+    alive_agents = world.get_alive_agents()
+    # Get all other agents (exclude self)
+    candidates = [a for a in alive_agents if a.id != npc.id and a.state == "alive"]
+    
+    if not candidates:
+        # No one else to vote for, skip vote
+        return None
+    
+    # Bad NPCs prefer to vote for good agents
+    good_agents = [a for a in candidates if a.role == "good"]
+    
+    if good_agents:
+        # Prefer voting for good agents
+        # Could use some strategy here, but for now pick randomly from good agents
+        # with slight preference for agents with lower suspicion (less likely to be suspected)
+        if random.random() < 0.8:  # 80% chance to vote for a good agent
+            # Pick a random good agent
+            return random.choice(good_agents).id
+        else:
+            # 20% chance to vote for any agent (including bad if any)
+            return random.choice(candidates).id
+    else:
+        # No good agents left, vote for any other agent
+        # Bad NPCs might vote for other bad agents if it helps them survive
+        return random.choice(candidates).id

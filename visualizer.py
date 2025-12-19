@@ -211,6 +211,37 @@ def draw_alive_agents():
                 screen.blit(behavior_text, (pos_x - 20, pos_y + 18))
 
 
+def draw_meeting_banner():
+    """Draw meeting banner at the top of the screen when in meeting phase."""
+    if not game_world or not hasattr(game_world, 'phase'):
+        return
+    
+    from world import GamePhase
+    if game_world.phase == GamePhase.PHASE_MEETING:
+        # Draw banner background
+        banner_height = 50
+        banner_rect = pygame.Rect(0, 0, SCREEN_WIDTH, banner_height)
+        pygame.draw.rect(screen, (100, 50, 50), banner_rect)  # Dark red background
+        pygame.draw.rect(screen, (255, 200, 0), banner_rect, 3)  # Yellow border
+        
+        # Draw banner text
+        banner_text = font.render("=== MEETING IN PROGRESS ===", True, (255, 255, 0))
+        text_rect = banner_text.get_rect(center=(SCREEN_WIDTH // 2, banner_height // 2))
+        screen.blit(banner_text, text_rect)
+        
+        # Show meeting step info
+        if hasattr(game_world, 'meeting_step'):
+            step_names = ["Statements", "Voting", "Results"]
+            step_name = step_names[game_world.meeting_step] if game_world.meeting_step < len(step_names) else "Unknown"
+            step_text = small_font.render(f"Step: {step_name}", True, WHITE)
+            screen.blit(step_text, (SCREEN_WIDTH - 150, 15))
+        
+        # Show reporter if available
+        if hasattr(game_world, 'meeting_reporter_id') and game_world.meeting_reporter_id:
+            reporter_text = small_font.render(f"Reported by: {game_world.meeting_reporter_id}", True, WHITE)
+            screen.blit(reporter_text, (20, 30))
+
+
 def draw_game_info():
     """Draw game state info in top-left corner."""
     info_y = 10
@@ -230,6 +261,22 @@ def draw_game_info():
     info_y += 25
     mode_text = font.render(f"Mode: {'Player' if is_player_mode else 'Simulation'}", True, WHITE)
     screen.blit(mode_text, (10, info_y))
+    
+    # Show phase (if in meeting)
+    if hasattr(game_world, 'phase'):
+        from world import GamePhase
+        if game_world.phase == GamePhase.PHASE_MEETING:
+            info_y += 25
+            phase_text = font.render(f"Phase: MEETING", True, (255, 255, 0))  # Yellow
+            screen.blit(phase_text, (10, info_y))
+        else:
+            # Show time until next automatic meeting
+            if hasattr(game_world, 'last_meeting_time') and hasattr(game_world, 'meeting_interval'):
+                time_since_last = game_world.current_time - game_world.last_meeting_time
+                time_until_next = max(0, game_world.meeting_interval - time_since_last)
+                info_y += 25
+                next_meeting_text = font.render(f"Next meeting in: {time_until_next:.1f}s", True, (200, 200, 255))
+                screen.blit(next_meeting_text, (10, info_y))
 
 
 def draw_player_controls():
@@ -676,6 +723,9 @@ def main_loop():
         
         # 6. Draw game info (turn, time, etc.)
         draw_game_info()
+        
+        # 6.5. Draw meeting banner (if in meeting phase)
+        draw_meeting_banner()
         
         # 7. Draw player controls (if in player mode)
         draw_player_controls()

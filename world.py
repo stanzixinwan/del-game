@@ -4,6 +4,12 @@ from memory import MemoryItem
 from room import Room
 import time
 import random
+from enum import Enum
+
+class GamePhase(Enum):
+    """Game phase enumeration."""
+    PHASE_PLAYING = "playing"  # Normal movement/action phase
+    PHASE_MEETING = "meeting"  # Voting/meeting phase
 
 class World:
     """World representation with id_roles."""
@@ -66,6 +72,19 @@ class World:
         self.current_time = 0.0  # Current game time
         self.event_history = []  # Global event history
         
+        # Game phase state machine
+        self.phase = GamePhase.PHASE_PLAYING  # Current game phase
+        self.meeting_timer = 0.0  # Timer for meeting phase progression
+        self.meeting_step = 0  # Current step in meeting (0=statements, 1=voting, 2=result)
+        self.meeting_queue = []  # Queue of agents who need to speak/vote
+        self.meeting_reporter_id = None  # ID of agent who triggered the meeting
+        self.meeting_statement_timer = 0.0  # Timer for individual statement delays
+        self.meeting_next_statement_time = 2.0  # Time between statements (2 seconds)
+        
+        # Automatic meeting scheduling
+        self.last_meeting_time = 0.0  # Time when last meeting started
+        self.meeting_interval = 10.0  # Seconds between automatic meetings
+        
         # Initialize all possible worlds and sus for all agents
         self._initialize_all_worlds()
         self._initialize_sus()
@@ -73,42 +92,45 @@ class World:
     
     def _initialize_rooms(self, room_names):
         """
-        Initialize Room objects with default connections.
+        Initialize Room objects with T-shaped connections.
+        Room B is the central hub connected to A, C, and D.
+        A, C, and D are only connected to B.
         
         Args:
-            room_names: list of room name strings
+            room_names: list of room name strings (must have at least 4 rooms for T-shape)
         
         Returns:
             dict mapping room name -> Room object
         """
-        # First create connections dict using old logic
-        connections = {}
-        if len(room_names) == 4:
-            a, b, c, d = room_names[0], room_names[1], room_names[2], room_names[3]
-            connections = {
-                a: [b, c],
-                b: [a, d],
-                c: [a, d],
-                d: [b, c]
-            }
-        elif len(room_names) == 2:
-            connections = {
-                room_names[0]: [room_names[1]],
-                room_names[1]: [room_names[0]]
-            }
-        elif len(room_names) >= 3:
-            connections = {room: [] for room in room_names}
-            for i in range(len(room_names) - 1):
-                connections[room_names[i]].append(room_names[i + 1])
-                connections[room_names[i + 1]].append(room_names[i])
-            if len(room_names) >= 3:
-                connections[room_names[0]].append(room_names[-1])
-                connections[room_names[-1]].append(room_names[0])
-        else:
-            connections = {room: [] for room in room_names}
+        # Create Room objects first (no connections yet)
+        rooms = {name: Room(name, []) for name in room_names}
         
-        # Create Room objects with connections
-        rooms = {name: Room(name, connections.get(name, [])) for name in room_names}
+        # Set up T-shaped layout: B (second room) connects to A, C, D
+        if len(room_names) >= 4:
+            a, b, c, d = room_names[0], room_names[1], room_names[2], room_names[3]
+            
+            # Room A connects to B
+            rooms[a].add_connection(b)
+            # Room B connects to A, C, D (central hub)
+            rooms[b].add_connection(a)
+            rooms[b].add_connection(c)
+            rooms[b].add_connection(d)
+            # Room C connects to B
+            rooms[c].add_connection(b)
+            # Room D connects to B
+            rooms[d].add_connection(b)
+        elif len(room_names) == 2:
+            # Simple two-room connection
+            rooms[room_names[0]].add_connection(room_names[1])
+            rooms[room_names[1]].add_connection(room_names[0])
+        elif len(room_names) == 3:
+            # Three rooms: middle room connects to both ends
+            rooms[room_names[0]].add_connection(room_names[1])
+            rooms[room_names[1]].add_connection(room_names[0])
+            rooms[room_names[1]].add_connection(room_names[2])
+            rooms[room_names[2]].add_connection(room_names[1])
+        # For 1 room or empty, no connections needed
+        
         return rooms
     
     def _register_agents_in_rooms(self):
@@ -297,153 +319,209 @@ class World:
         # Fallback to old method
         return [a for a in self.get_all_agents() if a.state == "dead" and a.location == location]
     
-    def conduct_vote(self, reporter_id):
+    def start_meeting(self, reporter_id):
         """
-        Conduct a vote after a report.
-        All agents make statements in turn, then vote.
-        Returns the agent id with most votes, or None if tie/no votes.
-        Also updates beliefs based on voting results.
+        Start a meeting/voting phase after a report.
+        Sets up the meeting phase, teleports all agents to central location, and initializes queues.
+        
+        Args:
+            reporter_id: ID of agent who triggered the meeting (reported)
         """
+        # Set phase to meeting
+        self.phase = GamePhase.PHASE_MEETING
+        self.meeting_reporter_id = reporter_id
+        self.meeting_timer = 0.0
+        self.meeting_statement_timer = 0.0
+        self.meeting_step = 0  # 0 = statements phase, 1 = voting phase, 2 = result phase
+        
+        # Get all alive agents
+        alive_agents = self.get_alive_agents()
+        
+        # Teleport all agents to central location (first room)
+        meeting_location = list(self.rooms.keys())[0] if self.rooms else None
+        if meeting_location:
+            for agent in alive_agents:
+                old_location = agent.location
+                if old_location and old_location in self.rooms:
+                    self.rooms[old_location].remove_agent(agent)
+                agent.location = meeting_location
+                if meeting_location in self.rooms:
+                    self.rooms[meeting_location].add_agent(agent)
+        
+        # Initialize meeting queue (all alive agents will speak in order)
+        self.meeting_queue = alive_agents.copy()
+        
+        # Update last meeting time (reset automatic meeting timer)
+        self.last_meeting_time = self.current_time
+        
+        print(f"\n=== MEETING STARTED (Reported by {reporter_id}) ===")
+        print(f"All agents gathered at {meeting_location}")
+    
+    def update_meeting(self, delta_time):
+        """
+        Update meeting phase logic (called when phase == PHASE_MEETING).
+        Handles phased meeting progression: statements -> voting -> results.
+        
+        Args:
+            delta_time: time elapsed since last update
+        """
+        if self.phase != GamePhase.PHASE_MEETING:
+            return
+        
+        self.meeting_timer += delta_time
+        self.meeting_statement_timer += delta_time
+        
         from npc_policy import choose_statement
         from actions import Actions
         
-        votes = {}
-        alive_agents = self.get_alive_agents()
-        
-        print(f"\n=== VOTING (Reported by {reporter_id}) ===")
-        
-        # Phase 1: All agents make statements in turn
-        print("\n--- Statements Phase ---")
-        print("All agents speak in turn:")
-        for agent in alive_agents:
-            if isinstance(agent, NPC):
-                # NPCs use choose_statement
-                statement = choose_statement(agent, self)
-                if statement:
-                    # NPC makes statement using SAY action
-                    Actions.say(self, agent, statement.predicate, statement.subject, statement.value)
-                    print(f"  {agent.id} says: {statement}")
-                else:
-                    print(f"  {agent.id} stays silent")
-            else:
-                # Player can make statement (interactive)
-                from agent import Player as PlayerClass
-                if isinstance(agent, PlayerClass):
-                    print(f"\n{agent.id}, do you want to make a statement? (y/n): ", end="")
-                    try:
-                        choice = input().strip().lower()
-                        if choice == 'y':
-                            print("Statement format: predicate subject value")
-                            print("  predicate: role | location | did")
-                            predicate = input("Predicate: ").strip().lower()
-                            if predicate in ["role", "location", "did"]:
-                                # Show available agents
-                                candidates = [a for a in alive_agents if a.id != agent.id]
-                                print("Available agents:")
-                                for i, a in enumerate(candidates):
-                                    print(f"  {i}: {a.id}")
-                                try:
-                                    subj_choice = int(input("Subject (agent number): "))
-                                    subject_id = candidates[subj_choice].id
-                                    value = input("Value: ").strip()
-                                    if value:
-                                        Actions.say(self, agent, predicate, subject_id, value)
-                                        print(f"  {agent.id} says: {predicate} {subject_id} {value}")
-                                except (ValueError, IndexError):
-                                    print("Invalid choice, skipping statement.")
-                        else:
-                            print(f"  {agent.id} stays silent")
-                    except (EOFError, KeyboardInterrupt):
-                        print(f"  {agent.id} stays silent")
-        
-        # Phase 2: All agents vote
-        print("\n--- Voting Phase ---")
-        for agent in alive_agents:
-            vote_target = agent.vote(self)
-            if vote_target:
-                votes[vote_target] = votes.get(vote_target, 0) + 1
-                print(f"{agent.id} votes for {vote_target}")
-            else:
-                print(f"{agent.id} skips vote")
-        
-        if not votes:
-            print("No votes cast.")
-            return None
-        
-        # Find agent with most votes
-        max_votes = max(votes.values())
-        winners = [agent_id for agent_id, count in votes.items() if count == max_votes]
-        
-        if len(winners) == 1:
-            voted_out_id = winners[0]
-            print(f"\nResult: {voted_out_id} is voted out with {max_votes} vote(s)!")
-            
-            # Get voted agent before marking dead
-            voted_agent = self._get_agent_by_id(voted_out_id)
-            if not voted_agent:
-                return voted_out_id
-            
-            # Check game state before marking dead
-            old_state = voted_agent.state
-            voted_agent.state = "dead"
-            game_ended = self.game_over()
-            
-            # Create vote_result event as public fact for all agents
-            # All agents (including the voted-out one) observe this as FACT
-            all_agents_for_event = [a for a in self.get_all_agents() 
-                                  if (a.state == "alive" or a.id == voted_out_id)]
-            location = (all_agents_for_event[0].location if all_agents_for_event 
-                       else voted_agent.location if voted_agent else "unknown")
-            
-            vote_result_event = Event(
-                action="vote_result",
-                actor=reporter_id,  # Reporter triggered the vote
-                location=location,
-                witnesses=[a.id for a in all_agents_for_event],
-                visibility="public"
-            )
-            # Add custom attributes for vote result
-            vote_result_event.voted_out_id = voted_out_id
-            vote_result_event.game_ended = game_ended
-            vote_result_event.votes = votes
-            
-            # Process vote result as public event (all agents observe it as FACT)
-            # Include voted agent so they can update beliefs about voters
-            for agent in all_agents_for_event:
-                memory_item = MemoryItem(vote_result_event, "observation")
-                agent.update_knowledge(memory_item)
-                agent.update_belief(memory_item, self)
-            
-            # Additional logic: if game not over and dead agents >= bad agents,
-            # eliminate worlds where all dead agents are bad
-            if not game_ended:
-                alive_agents = self.get_alive_agents()
-                dead_agents = [a for a in self.get_all_agents() if a.state == "dead"]
-                num_bad = sum(1 for a in alive_agents if a.role == "bad")
+        # Step 0: Statements Phase - agents speak one at a time (every 2 seconds)
+        if self.meeting_step == 0:
+            # Check if it's time for next statement (every 2 seconds)
+            if self.meeting_statement_timer >= self.meeting_next_statement_time and self.meeting_queue:
+                agent = self.meeting_queue.pop(0)
                 
-                if len(dead_agents) >= num_bad and num_bad > 0:
-                    # Eliminate worlds where all dead agents are bad
-                    for agent in alive_agents:
-                        if not agent.knowledge["worlds"]:
-                            continue
-                        
-                        worlds_to_keep = []
-                        for world_state in agent.knowledge["worlds"]:
-                            # Check if all dead agents are bad in this world
-                            all_dead_are_bad = all(
-                                world_state.get(dead_agent.id) == "bad" 
-                                for dead_agent in dead_agents
-                            )
-                            if not all_dead_are_bad:
-                                worlds_to_keep.append(world_state)
-                        
-                        if worlds_to_keep:
-                            agent.knowledge["worlds"] = worlds_to_keep
+                if isinstance(agent, NPC):
+                    # NPCs use choose_statement
+                    statement = choose_statement(agent, self)
+                    if statement:
+                        # NPC makes statement using SAY action
+                        Actions.say(self, agent, statement.predicate, statement.subject, statement.value)
+                        print(f"  {agent.id} says: {statement}")
+                    else:
+                        print(f"  {agent.id} stays silent")
+                else:
+                    # Player can make statement (for now, we'll skip interactive input in async mode)
+                    # In async mode, players could make statements via UI - for now they stay silent
+                    # This could be enhanced later with UI prompts
+                    print(f"  {agent.id} stays silent (async mode)")
+                
+                # Reset timer for next statement
+                self.meeting_statement_timer = 0.0
             
-            return voted_out_id
-        else:
-            print(f"\nResult: Tie! No one is voted out.")
-            return None
+            # If queue is empty, move to voting phase
+            if not self.meeting_queue:
+                print("\n--- Voting Phase ---")
+                self.meeting_step = 1
+                # Collect all alive agents for voting
+                self.meeting_queue = self.get_alive_agents().copy()
+                self.meeting_timer = 0.0  # Reset timer for voting phase
+        
+        # Step 1: Voting Phase - all agents vote (all at once, or we could stagger)
+        elif self.meeting_step == 1:
+            # Process all votes (could also be staggered, but for simplicity do all at once)
+            votes = {}
+            for agent in self.meeting_queue:
+                vote_target = agent.vote(self)
+                if vote_target:
+                    votes[vote_target] = votes.get(vote_target, 0) + 1
+                    print(f"{agent.id} votes for {vote_target}")
+                else:
+                    print(f"{agent.id} skips vote")
+            
+            self.meeting_queue = []  # Clear queue
+            self.meeting_step = 2  # Move to result phase
+            self.meeting_timer = 0.0
+            
+            # Store votes for result phase
+            if not votes:
+                print("No votes cast.")
+                self.meeting_votes = {}
+                self.meeting_result = None
+            else:
+                # Find agent with most votes
+                max_votes = max(votes.values())
+                winners = [agent_id for agent_id, count in votes.items() if count == max_votes]
+                
+                if len(winners) == 1:
+                    self.meeting_votes = votes
+                    self.meeting_result = winners[0]
+                    print(f"\nResult: {self.meeting_result} is voted out with {max_votes} vote(s)!")
+                else:
+                    self.meeting_votes = votes
+                    self.meeting_result = None
+                    print(f"\nResult: Tie! No one is voted out.")
+        
+        # Step 2: Result Phase - execute ejection and update beliefs (after brief delay)
+        elif self.meeting_step == 2:
+            # Wait a moment to show the result, then process
+            if self.meeting_timer >= 1.0:  # 1 second delay to show result
+                # Handle result (whether someone was voted out or tie)
+                if self.meeting_result:
+                    voted_out_id = self.meeting_result
+                    voted_agent = self._get_agent_by_id(voted_out_id)
+                    if voted_agent:
+                        # Mark agent as dead
+                        voted_agent.state = "dead"
+                        game_ended = self.game_over()
+                        
+                        # Create vote_result event as public fact for all agents
+                        all_agents_for_event = [a for a in self.get_all_agents() 
+                                              if (a.state == "alive" or a.id == voted_out_id)]
+                        location = (all_agents_for_event[0].location if all_agents_for_event 
+                                   else voted_agent.location if voted_agent else "unknown")
+                        
+                        vote_result_event = Event(
+                            action="vote_result",
+                            actor=self.meeting_reporter_id,
+                            location=location,
+                            witnesses=[a.id for a in all_agents_for_event],
+                            visibility="public"
+                        )
+                        vote_result_event.voted_out_id = voted_out_id
+                        vote_result_event.game_ended = game_ended
+                        vote_result_event.votes = self.meeting_votes
+                        
+                        # Process vote result as public event (all agents observe it as FACT)
+                        for agent in all_agents_for_event:
+                            memory_item = MemoryItem(vote_result_event, "observation")
+                            agent.update_knowledge(memory_item)
+                            agent.update_belief(memory_item, self)
+                        
+                        # Additional logic: if game not over and dead agents >= bad agents,
+                        # eliminate worlds where all dead agents are bad
+                        if not game_ended:
+                            alive_agents = self.get_alive_agents()
+                            dead_agents = [a for a in self.get_all_agents() if a.state == "dead"]
+                            num_bad = sum(1 for a in alive_agents if a.role == "bad")
+                            
+                            if len(dead_agents) >= num_bad and num_bad > 0:
+                                # Eliminate worlds where all dead agents are bad
+                                for agent in alive_agents:
+                                    if not agent.knowledge["worlds"]:
+                                        continue
+                                    
+                                    worlds_to_keep = []
+                                    for world_state in agent.knowledge["worlds"]:
+                                        # Check if all dead agents are bad in this world
+                                        all_dead_are_bad = all(
+                                            world_state.get(dead_agent.id) == "bad" 
+                                            for dead_agent in dead_agents
+                                        )
+                                        if not all_dead_are_bad:
+                                            worlds_to_keep.append(world_state)
+                                    
+                                    if worlds_to_keep:
+                                        agent.knowledge["worlds"] = worlds_to_keep
+                # If tie or no result, just end meeting without ejecting anyone
+                
+                # Reset behavior for all agents (return from voting behavior)
+                for agent in self.get_alive_agents():
+                    agent.behavior = "idle"
+                
+                # Return to playing phase
+                self.phase = GamePhase.PHASE_PLAYING
+                self.meeting_queue = []
+                self.meeting_reporter_id = None
+                self.meeting_votes = None
+                self.meeting_result = None
+                print(f"\n=== MEETING ENDED ===\n")
+    
+    def conduct_vote(self, reporter_id):
+        """
+        Legacy method - now calls start_meeting for backward compatibility.
+        This is called from Actions.report, but start_meeting will be used instead.
+        """
+        self.start_meeting(reporter_id)
     
     def _has_kill_opportunity(self, npc):
         """
@@ -475,13 +553,30 @@ class World:
         Update NPCs: time-based action system.
         NPCs decide and act based on time, not every turn.
         Bad agents check for kill opportunities more frequently (within 2 seconds).
+        Automatically triggers meetings every 10 seconds.
         
         Args:
             delta_time: time elapsed since last update
         """
-        from actions import Actions
-        
         self.current_time += delta_time
+        
+        # If in meeting phase, delegate to update_meeting
+        if self.phase == GamePhase.PHASE_MEETING:
+            self.update_meeting(delta_time)
+            return
+        
+        # Check if it's time for an automatic meeting (every 10 seconds)
+        time_since_last_meeting = self.current_time - self.last_meeting_time
+        if time_since_last_meeting >= self.meeting_interval:
+            # Pick a random alive agent to be the "reporter" for the automatic meeting
+            alive_agents = self.get_alive_agents()
+            if alive_agents:
+                reporter = random.choice(alive_agents)
+                print(f"\n[Automatic Meeting] Triggered by {reporter.id} (10 seconds elapsed)")
+                self.start_meeting(reporter.id)
+                return  # Meeting phase started, skip normal NPC updates this frame
+        
+        from actions import Actions
         
         for npc in self.npcs:
             if npc.state != "alive":
