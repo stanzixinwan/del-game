@@ -207,12 +207,15 @@ class Actions:
             world.rooms[target.location].remove_agent(target)
             world.rooms[target.location].add_agent(target)  # Re-add as dead agent
         
-        # If kill was witnessed, agent is caught
+        # If kill was witnessed, witnesses observe it as FACT (hard knowledge)
+        # This will trigger epistemic updates in _update_belief_hard_knowledge:
+        # - Witnesses will eliminate all worlds where the killer is "good"
+        # - The event is already created with "witnessed" visibility above,
+        #   which creates MemoryItems with FACT certainty for witnesses
+        # - No immediate game over - let the epistemic reasoning handle it
         if witnesses:
-            if agent.id == world.player.id:
-                print(f"Kill was witnessed! You are caught!")
-            agent.state = "dead"
-            world.result = "Caught"
+            print(f"Kill was witnessed by: {', '.join(witnesses)}")
+            print(f"  → Witnesses now know {agent.id} is bad (FACT)")
         
         agent.behavior = "idle"  # After kill, reset to idle
         

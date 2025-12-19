@@ -5,6 +5,7 @@ from room import Room
 import time
 import random
 from enum import Enum
+from itertools import combinations
 
 class GamePhase(Enum):
     """Game phase enumeration."""
@@ -48,10 +49,10 @@ class World:
             self.connections = {name: room.get_connected_rooms() for name, room in self.rooms.items()}
         
         # Set player (can be None for simulation mode with all NPCs)
-        if player is not None:
-            self.player = player
-        elif player is False:  # Explicit False means no player
+        if player is False:  # Explicit False means no player
             self.player = None
+        elif player is not None:
+            self.player = player
         else:
             initial_location = list(self.rooms.keys())[0] if self.rooms else "Storage"
             self.player = Player("player", role="bad", location=initial_location)
@@ -80,6 +81,8 @@ class World:
         self.meeting_reporter_id = None  # ID of agent who triggered the meeting
         self.meeting_statement_timer = 0.0  # Timer for individual statement delays
         self.meeting_next_statement_time = 2.0  # Time between statements (2 seconds)
+        self.meeting_room = "E"  # Room E is the meeting room
+        self.original_locations = {}  # Store original locations before meeting (agent_id -> location)
         
         # Automatic meeting scheduling
         self.last_meeting_time = 0.0  # Time when last meeting started
@@ -93,11 +96,11 @@ class World:
     def _initialize_rooms(self, room_names):
         """
         Initialize Room objects with T-shaped connections.
-        Room B is the central hub connected to A, C, and D.
-        A, C, and D are only connected to B.
+        Room B is the central hub connected to all other rooms.
+        Other rooms only connect to B.
         
         Args:
-            room_names: list of room name strings (must have at least 4 rooms for T-shape)
+            room_names: list of room name strings (must have at least 2 rooms)
         
         Returns:
             dict mapping room name -> Room object
@@ -105,30 +108,16 @@ class World:
         # Create Room objects first (no connections yet)
         rooms = {name: Room(name, []) for name in room_names}
         
-        # Set up T-shaped layout: B (second room) connects to A, C, D
-        if len(room_names) >= 4:
-            a, b, c, d = room_names[0], room_names[1], room_names[2], room_names[3]
+        # Set up T-shaped layout: B (second room) is central hub
+        if len(room_names) >= 2:
+            b = room_names[1]  # B is the central hub (second room)
+            other_rooms = [r for r in room_names if r != b]
             
-            # Room A connects to B
-            rooms[a].add_connection(b)
-            # Room B connects to A, C, D (central hub)
-            rooms[b].add_connection(a)
-            rooms[b].add_connection(c)
-            rooms[b].add_connection(d)
-            # Room C connects to B
-            rooms[c].add_connection(b)
-            # Room D connects to B
-            rooms[d].add_connection(b)
-        elif len(room_names) == 2:
-            # Simple two-room connection
-            rooms[room_names[0]].add_connection(room_names[1])
-            rooms[room_names[1]].add_connection(room_names[0])
-        elif len(room_names) == 3:
-            # Three rooms: middle room connects to both ends
-            rooms[room_names[0]].add_connection(room_names[1])
-            rooms[room_names[1]].add_connection(room_names[0])
-            rooms[room_names[1]].add_connection(room_names[2])
-            rooms[room_names[2]].add_connection(room_names[1])
+            # Room B connects to all other rooms (central hub)
+            for other_room in other_rooms:
+                rooms[b].add_connection(other_room)
+                # Other rooms connect to B
+                rooms[other_room].add_connection(b)
         # For 1 room or empty, no connections needed
         
         return rooms
@@ -188,24 +177,61 @@ class World:
         return []
     
     def _initialize_all_worlds(self):
-        """Initialize all possible worlds for each agent (all cases of 1 bad agent)."""
+        """
+        Initialize all possible worlds for each agent.
+        
+        Good agents: Know their own role (good), so they consider all possible combinations
+        of bad agents among the other agents.
+        
+        Bad agents: Know all bad agents (including themselves), so they only have
+        one world where all bad agents are correctly identified.
+        """
         all_agents = self.get_all_agents()
         all_agent_ids = [a.id for a in all_agents]
         
-        # Create all possible worlds (one bad agent, rest good)
+        # Identify all bad agents
+        bad_agent_ids = [a.id for a in all_agents if a.role == "bad"]
+        num_bad = len(bad_agent_ids)
+        
         for agent in all_agents:
             worlds = []
-            for bad_agent_id in all_agent_ids:
-                # Create a world where this agent_id is bad
+            
+            if agent.role == "good":
+                # Good agent: Knows they are good, considers all combinations of bad agents among others
+                other_agent_ids = [aid for aid in all_agent_ids if aid != agent.id]
+                
+                # Generate all possible combinations of bad agents from the other agents
+                # Number of bad agents to choose = num_bad (since we know the total number)
+                if num_bad > 0 and len(other_agent_ids) >= num_bad:
+                    for bad_combination in combinations(other_agent_ids, num_bad):
+                        # Create a world where these agents are bad
+                        world_state = {}
+                        for aid in all_agent_ids:
+                            if aid == agent.id:
+                                # Agent knows they are good
+                                world_state[aid] = "good"
+                            elif aid in bad_combination:
+                                # This agent is bad in this world
+                                world_state[aid] = "bad"
+                            else:
+                                # This agent is good in this world
+                                world_state[aid] = "good"
+                        worlds.append(world_state)
+                elif num_bad == 0:
+                    # No bad agents - only one world where everyone is good
+                    world_state = {aid: "good" for aid in all_agent_ids}
+                    worlds.append(world_state)
+            
+            elif agent.role == "bad":
+                # Bad agent: Knows all bad agents (including themselves)
+                # Only one world where all bad agents are correctly identified
                 world_state = {}
                 for aid in all_agent_ids:
-                    if aid == bad_agent_id:
+                    if aid in bad_agent_ids:
                         world_state[aid] = "bad"
                     else:
                         world_state[aid] = "good"
-                # Eliminate world where agent's own role is wrong
-                if world_state.get(agent.id) == agent.role:
-                    worlds.append(world_state)
+                worlds.append(world_state)
             
             agent.knowledge["worlds"] = worlds
     
@@ -327,6 +353,11 @@ class World:
         Args:
             reporter_id: ID of agent who triggered the meeting (reported)
         """
+        # Prevent starting a new meeting if already in a meeting
+        if self.phase == GamePhase.PHASE_MEETING:
+            print(f"[Warning] Meeting already in progress, ignoring new meeting request from {reporter_id}")
+            return
+        
         # Set phase to meeting
         self.phase = GamePhase.PHASE_MEETING
         self.meeting_reporter_id = reporter_id
@@ -337,8 +368,13 @@ class World:
         # Get all alive agents
         alive_agents = self.get_alive_agents()
         
-        # Teleport all agents to central location (first room)
-        meeting_location = list(self.rooms.keys())[0] if self.rooms else None
+        # Store original locations before teleporting to meeting room
+        self.original_locations = {}
+        for agent in alive_agents:
+            self.original_locations[agent.id] = agent.location
+        
+        # Teleport all agents to meeting room (room E)
+        meeting_location = self.meeting_room if self.meeting_room in self.rooms else None
         if meeting_location:
             for agent in alive_agents:
                 old_location = agent.location
@@ -355,7 +391,7 @@ class World:
         self.last_meeting_time = self.current_time
         
         print(f"\n=== MEETING STARTED (Reported by {reporter_id}) ===")
-        print(f"All agents gathered at {meeting_location}")
+        print(f"All agents gathered at {meeting_location} (meeting room)")
     
     def update_meeting(self, delta_time):
         """
@@ -408,38 +444,40 @@ class World:
         
         # Step 1: Voting Phase - all agents vote (all at once, or we could stagger)
         elif self.meeting_step == 1:
-            # Process all votes (could also be staggered, but for simplicity do all at once)
-            votes = {}
-            for agent in self.meeting_queue:
-                vote_target = agent.vote(self)
-                if vote_target:
-                    votes[vote_target] = votes.get(vote_target, 0) + 1
-                    print(f"{agent.id} votes for {vote_target}")
-                else:
-                    print(f"{agent.id} skips vote")
-            
-            self.meeting_queue = []  # Clear queue
-            self.meeting_step = 2  # Move to result phase
-            self.meeting_timer = 0.0
-            
-            # Store votes for result phase
-            if not votes:
-                print("No votes cast.")
-                self.meeting_votes = {}
-                self.meeting_result = None
-            else:
-                # Find agent with most votes
-                max_votes = max(votes.values())
-                winners = [agent_id for agent_id, count in votes.items() if count == max_votes]
+            # Process votes only once (check if queue is not empty to avoid reprocessing)
+            if self.meeting_queue:
+                votes = {}
+                for agent in self.meeting_queue:
+                    vote_target = agent.vote(self)
+                    if vote_target:
+                        votes[vote_target] = votes.get(vote_target, 0) + 1
+                        print(f"{agent.id} votes for {vote_target}")
+                    else:
+                        print(f"{agent.id} skips vote")
                 
-                if len(winners) == 1:
-                    self.meeting_votes = votes
-                    self.meeting_result = winners[0]
-                    print(f"\nResult: {self.meeting_result} is voted out with {max_votes} vote(s)!")
-                else:
-                    self.meeting_votes = votes
+                # Store votes for result phase
+                if not votes:
+                    print("No votes cast.")
+                    self.meeting_votes = {}
                     self.meeting_result = None
-                    print(f"\nResult: Tie! No one is voted out.")
+                else:
+                    # Find agent with most votes
+                    max_votes = max(votes.values())
+                    winners = [agent_id for agent_id, count in votes.items() if count == max_votes]
+                    
+                    if len(winners) == 1:
+                        self.meeting_votes = votes
+                        self.meeting_result = winners[0]
+                        print(f"\nResult: {self.meeting_result} is voted out with {max_votes} vote(s)!")
+                    else:
+                        self.meeting_votes = votes
+                        self.meeting_result = None
+                        print(f"\nResult: Tie! No one is voted out.")
+                
+                self.meeting_queue = []  # Clear queue
+                self.meeting_step = 2  # Move to result phase
+                self.meeting_timer = 0.0
+            # If queue is already empty, we're waiting for result phase timer (do nothing, just wait)
         
         # Step 2: Result Phase - execute ejection and update beliefs (after brief delay)
         elif self.meeting_step == 2:
@@ -508,13 +546,32 @@ class World:
                 for agent in self.get_alive_agents():
                     agent.behavior = "idle"
                 
+                # Return agents to their original locations before meeting
+                for agent in self.get_alive_agents():
+                    original_location = self.original_locations.get(agent.id)
+                    if original_location:
+                        # Remove from meeting room
+                        if agent.location and agent.location in self.rooms:
+                            self.rooms[agent.location].remove_agent(agent)
+                        # Return to original location
+                        agent.location = original_location
+                        if original_location in self.rooms:
+                            self.rooms[original_location].add_agent(agent)
+                
                 # Return to playing phase
                 self.phase = GamePhase.PHASE_PLAYING
                 self.meeting_queue = []
                 self.meeting_reporter_id = None
                 self.meeting_votes = None
                 self.meeting_result = None
+                self.original_locations = {}  # Clear stored locations
+                
+                # Meeting time did not count towards simulation time (current_time was paused)
+                # last_meeting_time was set at meeting start, so automatic meetings will
+                # trigger 10 seconds of PLAYING time after this meeting ends
                 print(f"\n=== MEETING ENDED ===\n")
+                print(f"All agents returned to their original locations")
+                print(f"All agents returned to their original locations")
     
     def conduct_vote(self, reporter_id):
         """
@@ -555,15 +612,19 @@ class World:
         Bad agents check for kill opportunities more frequently (within 2 seconds).
         Automatically triggers meetings every 10 seconds.
         
+        Note: Meeting time does NOT count towards simulation time (current_time).
+        This prevents meetings from triggering immediately after each other.
+        
         Args:
             delta_time: time elapsed since last update
         """
-        self.current_time += delta_time
-        
-        # If in meeting phase, delegate to update_meeting
+        # If in meeting phase, delegate to update_meeting (but don't advance simulation time)
         if self.phase == GamePhase.PHASE_MEETING:
             self.update_meeting(delta_time)
             return
+        
+        # Only advance simulation time when NOT in meeting phase
+        self.current_time += delta_time
         
         # Check if it's time for an automatic meeting (every 10 seconds)
         time_since_last_meeting = self.current_time - self.last_meeting_time

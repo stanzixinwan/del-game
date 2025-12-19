@@ -12,6 +12,7 @@ They will raise TypeError if called with non-NPC agents.
 import random
 from statement import Statement
 from agent import Player as PlayerClass, NPC
+from memory import Certainty
 
 
 def choose_action(npc, world):
@@ -213,125 +214,161 @@ def choose_statement(npc, world):
     
     # Route to role-specific statement policy
     if npc.role == "good":
-        return _choose_statement_good(npc, world)
+        return _generate_good_statement(npc, world)
     elif npc.role == "bad":
-        return _choose_statement_bad(npc, world)
+        return _generate_bad_statement(npc, world)
     else:
         return None
 
 
-def _choose_statement_good(npc, world):
+def _generate_good_statement(npc, world):
     """
-    Statement policy for good NPC agents during voting phase.
+    Truthful Detective Strategy for good NPC agents.
     
-    Good NPCs can:
-    - Accuse: SAY("role", target, "bad") when they have evidence
-    - Defend: SAY("location", self, last_location) if accused
-    - Claim innocence: SAY("did", self, "task")
+    Priority 1 - Direct Witness: If agent has FACT certainty memory of a "kill" event,
+        they MUST return a statement accusing the killer.
+    Priority 2 - High Suspicion: If agent.sus[target] > 0.8, accuse the target.
+    Priority 3 - Info Sharing: Report recent FACT memories of other agents entering rooms.
+    Priority 4 - Self Alibi: Report their own current location truthfully.
     
     Args:
         npc: NPC instance (must be good role with sus tracking)
         world: World instance (game state)
+    
+    Returns:
+        Statement object or None if the NPC stays silent
     """
     # Ensure this is an NPC with sus tracking
     if not isinstance(npc, NPC) or not hasattr(npc, 'sus'):
         return None
-    # Check if NPC is being accused (high sus from others)
-    # For now, use a simple heuristic: if we have a strong suspect, accuse them
-    if npc.knowledge["worlds"]:
-        # Find the most likely bad agent based on world counts
-        agent_scores = {}
-        all_agents = world.get_all_agents()
-        
-        for agent in all_agents:
-            if agent.id == npc.id or agent.state != "alive":
-                continue
-            
-            # Count worlds where this agent is bad
-            count = 0
-            for world_state in npc.knowledge["worlds"]:
-                if world_state.get(agent.id) == "bad":
-                    count += 1
-            
-            agent_scores[agent.id] = count
-        
-        if agent_scores:
-            max_score = max(agent_scores.values())
-            if max_score > 0:
-                # Find agent(s) with max score
-                candidates = [aid for aid, score in agent_scores.items() if score == max_score]
-                
-                # If we have a clear suspect, accuse them
-                if len(candidates) == 1 and max_score >= len(npc.knowledge["worlds"]) * 0.5:
-                    target_id = candidates[0]
-                    if random.random() < 0.7:  # 70% chance to accuse
-                        return Statement("role", target_id, "bad", npc.id)
-                
-                # If we have high suspicion, accuse based on sus values
-                elif len(candidates) > 1:
-                    # Use sus values to break tie
-                    max_sus = -1
-                    best_target = None
-                    for candidate_id in candidates:
-                        sus_value = npc.sus.get(candidate_id, 0)
-                        if sus_value > max_sus:
-                            max_sus = sus_value
-                            best_target = candidate_id
-                    
-                    if best_target and max_sus > 0.5 and random.random() < 0.6:
-                        return Statement("role", best_target, "bad", npc.id)
     
-    # Defend: if someone accused us (high sus from others pointing to us)
-    # For now, we'll occasionally defend ourselves
-    if random.random() < 0.2:  # 20% chance to defend
+    memories = npc.knowledge.get("memory", [])
+    
+    # Priority 1 - Direct Witness: Check for FACT certainty memory of a "kill" event
+    for mem in memories:
+        if (mem.certainty == Certainty.FACT and 
+            mem.event.action == "kill" and 
+            mem.event.actor):
+            # Agent witnessed a kill - MUST accuse the killer
+            killer_id = mem.event.actor
+            # Verify killer is still alive (can't accuse dead agents)
+            killer = world._get_agent_by_id(killer_id)
+            if killer and killer.state == "alive" and killer_id != npc.id:
+                return Statement("did", killer_id, "kill", npc.id)
+    
+    # Priority 2 - High Suspicion: Check if any agent has sus > 0.8
+    alive_agents = world.get_alive_agents()
+    for agent in alive_agents:
+        if agent.id == npc.id or agent.state != "alive":
+            continue
+        sus_value = npc.sus.get(agent.id, 0)
+        if sus_value > 0.8:
+            return Statement("role", agent.id, "bad", npc.id)
+    
+    # Priority 3 - Info Sharing: Look for recent FACT memories of other agents entering rooms
+    # Get FACT memories of "enter" events, sorted by most recent (last in list is most recent)
+    enter_memories = []
+    for mem in memories:
+        if (mem.certainty == Certainty.FACT and 
+            mem.event.action == "enter" and 
+            mem.event.actor and 
+            mem.event.actor != npc.id):
+            enter_memories.append(mem)
+    
+    if enter_memories:
+        # Report the most recent sighting (last in list)
+        most_recent = enter_memories[-1]
+        observed_agent_id = most_recent.event.actor
+        observed_location = most_recent.event.location
+        # Verify agent is still alive
+        observed_agent = world._get_agent_by_id(observed_agent_id)
+        if observed_agent and observed_agent.state == "alive":
+            return Statement("location", observed_agent_id, observed_location, npc.id)
+    
+    # Priority 4 - Self Alibi (Default): Report own current location truthfully
+    if npc.location:
         return Statement("location", npc.id, npc.location, npc.id)
     
-    # Claim innocence: occasionally claim we were doing tasks
-    if random.random() < 0.2:  # 20% chance
-        return Statement("did", npc.id, "task", npc.id)
-    
-    # Most of the time, stay silent
+    # Fallback: stay silent
     return None
 
 
-def _choose_statement_bad(npc, world):
+def _generate_bad_statement(npc, world):
     """
-    Statement policy for bad NPC agents during voting phase.
+    Deceptive/Survival Strategy for bad NPC agents.
     
-    Bad NPCs can:
-    - Accuse others (deflection)
-    - Defend themselves
-    - Claim innocence
-    - Lie about their actions
+    Priority 1 - Emergency Fake Alibi: If dead body in current room, MUST lie about location.
+    Priority 2 - Framing: Pick a random good agent and accuse them (~30% chance).
+    Priority 3 - Confusion: Lie about a good agent's location (~30% chance).
+    Priority 4 - Partner Vouching: Claim another bad agent is "good" (~20% chance).
+    Priority 5 - Default Lie: Claim to be in a random room.
     
     Args:
         npc: NPC instance (must be bad role)
         world: World instance (game state)
+    
+    Returns:
+        Statement object or None if the NPC stays silent
     """
     # Ensure this is an NPC
     if not isinstance(npc, NPC):
         return None
+    
     alive_agents = world.get_alive_agents()
     good_agents = [a for a in alive_agents if a.role == "good" and a.id != npc.id]
+    bad_agents = [a for a in alive_agents if a.role == "bad" and a.id != npc.id]
+    all_rooms = list(world.rooms.keys()) if world.rooms else []
     
-    if not good_agents:
-        return None
+    # Priority 1 - Emergency Fake Alibi: Check if dead body in current room
+    dead_agents_at_location = world.get_dead_agents_at_location(npc.location)
+    if dead_agents_at_location:
+        # MUST lie - claim to be in a different room
+        if all_rooms and len(all_rooms) > 1:
+            # Pick a random room that's not the current one
+            fake_rooms = [r for r in all_rooms if r != npc.location]
+            if fake_rooms:
+                fake_location = random.choice(fake_rooms)
+                return Statement("location", npc.id, fake_location, npc.id)
+        # If only one room or no rooms, claim a different location anyway
+        return Statement("location", npc.id, "Unknown", npc.id)
     
-    # 1. If under suspicion, deflect by accusing someone else
-    # Check if we're a likely suspect in other agents' worlds
-    if random.random() < 0.6:  # 60% chance to deflect
+    # Priority 2 - Framing: Random chance ~30% to accuse a good agent
+    if good_agents and random.random() < 0.3:
         target = random.choice(good_agents)
         return Statement("role", target.id, "bad", npc.id)
     
-    # 2. Defend: claim we were at a location
-    if random.random() < 0.3:  # 30% chance
-        return Statement("location", npc.id, npc.location, npc.id)
+    # Priority 3 - Confusion: Random chance ~30% to lie about a good agent's location
+    if good_agents and all_rooms and random.random() < 0.3:
+        target = random.choice(good_agents)
+        # Pick a random room (might be true or false, but usually false to create confusion)
+        fake_location = random.choice(all_rooms)
+        return Statement("location", target.id, fake_location, npc.id)
     
-    # 3. Claim innocence: claim we were doing tasks
-    if random.random() < 0.2:  # 20% chance
-        return Statement("did", npc.id, "task", npc.id)
+    # Priority 4 - Partner Vouching: Random chance ~20% to claim a bad agent is good
+    if bad_agents and random.random() < 0.2:
+        partner = random.choice(bad_agents)
+        return Statement("role", partner.id, "good", npc.id)
     
-    # Stay silent otherwise
+    # Priority 5 - Default Lie: Claim to be in a random room (usually distinct from current)
+    if all_rooms:
+        if len(all_rooms) > 1:
+            # Pick a room that's usually different from current (80% chance)
+            if random.random() < 0.8:
+                fake_rooms = [r for r in all_rooms if r != npc.location]
+                if fake_rooms:
+                    fake_location = random.choice(fake_rooms)
+                else:
+                    fake_location = random.choice(all_rooms)
+            else:
+                # 20% chance to tell truth (blend in)
+                fake_location = npc.location
+        else:
+            # Only one room, claim it (truth or lie, doesn't matter)
+            fake_location = all_rooms[0]
+        
+        return Statement("location", npc.id, fake_location, npc.id)
+    
+    # Fallback: stay silent
     return None
 
 

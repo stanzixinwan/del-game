@@ -9,7 +9,7 @@ import pygame
 import sys
 # Import core game modules
 from world import World
-from agent import Player, NPC
+from agent import NPC
 
 # Initialize PyGame
 pygame.init()
@@ -41,7 +41,6 @@ small_font = pygame.font.SysFont("Arial", 14)
 game_world = None
 ROOM_COORDS = {}
 agent_positions = {}
-is_player_mode = False  # Whether we're in player mode or simulation mode
 
 
 def generate_room_coords(rooms):
@@ -145,7 +144,7 @@ def draw_dead_agents():
 
 
 def draw_alive_agents():
-    """Draw alive agents with color coding (red=player, blue=NPC)."""
+    """Draw alive agents with color coding (bad NPCs = dark red, good NPCs = blue)."""
     global agent_positions
     
     alive_agents = game_world.get_alive_agents()
@@ -166,12 +165,8 @@ def draw_alive_agents():
             # Store position for click detection
             agent_positions[agent.id] = (pos_x, pos_y)
             
-            # Color coding: Player = RED, Bad NPC = Dark Red, Good NPC = BLUE
-            if isinstance(agent, Player):
-                color = RED
-                # Add border for player
-                pygame.draw.circle(screen, (255, 255, 255), (pos_x, pos_y), 17, 2)
-            elif agent.role == "bad":
+            # Color coding: Bad NPC = Dark Red, Good NPC = BLUE
+            if agent.role == "bad":
                 color = (150, 0, 0)  # Dark red for bad NPCs
                 # Add pulsing border for bad agents to make them more visible
                 pygame.draw.circle(screen, (255, 100, 100), (pos_x, pos_y), 17, 2)
@@ -257,10 +252,6 @@ def draw_game_info():
         result_text = font.render(f"Game Over: {game_world.result}", True, RED)
         screen.blit(result_text, (10, info_y))
     
-    # Show mode
-    info_y += 25
-    mode_text = font.render(f"Mode: {'Player' if is_player_mode else 'Simulation'}", True, WHITE)
-    screen.blit(mode_text, (10, info_y))
     
     # Show phase (if in meeting)
     if hasattr(game_world, 'phase'):
@@ -278,39 +269,6 @@ def draw_game_info():
                 next_meeting_text = font.render(f"Next meeting in: {time_until_next:.1f}s", True, (200, 200, 255))
                 screen.blit(next_meeting_text, (10, info_y))
 
-
-def draw_player_controls():
-    """Draw player controls/help panel in bottom-left (above event log)."""
-    if not is_player_mode or not game_world or not game_world.player:
-        return
-    
-    controls = [
-        "Controls:",
-        "E - Enter (move to room)",
-        "K - Kill target",
-        "S - Say statement",
-        "R - Report",
-        "B - Sabotage",
-        "I - Idle",
-        "T - Task",
-        "H - Toggle help"
-    ]
-    
-    # Calculate panel height
-    panel_height = len(controls) * 20 + 10
-    panel_y = SCREEN_HEIGHT - panel_height - 210  # Above event log
-    
-    # Draw background
-    pygame.draw.rect(screen, (40, 40, 40), (10, panel_y, 280, panel_height))
-    pygame.draw.rect(screen, WHITE, (10, panel_y, 280, panel_height), 2)
-    
-    # Draw controls
-    y_offset = panel_y + 5
-    for control in controls:
-        control_text = small_font.render(control, True, WHITE)
-        screen.blit(control_text, (15, y_offset))
-        y_offset += 20
-    
 
 
 def draw_event_log():
@@ -544,112 +502,9 @@ def draw_brain_view(surface, agent_id):
             surface.blit(conn_text, (panel_x + 10, y_offset))
 
 
-def handle_player_action(action_name):
-    """Handle a player action in player mode. For complex actions, prompts in console."""
-    global game_world
-    
-    if not is_player_mode or not game_world or not game_world.player:
-        return
-    
-    from actions import Actions
-    
-    if game_world.player.state != "alive":
-        return
-    
-    # Process action based on type
-    if action_name == "enter":
-        # Show connected rooms and prompt in console
-        connected_rooms = game_world.get_connected_rooms(game_world.player.location)
-        print(f"\nConnected rooms from {game_world.player.location}: {', '.join(connected_rooms)}")
-        target_room = input("Enter room name (or press Enter to cancel): ").strip()
-        if target_room:
-            event = Actions.apply(game_world, game_world.player, "enter", target_room)
-            if event:
-                print(f"Player moved to {target_room}")
-            elif target_room not in connected_rooms:
-                print(f"Error: {target_room} is not connected to current location!")
-    
-    elif action_name == "kill":
-        # Get targets at current location
-        targets = [a for a in game_world.get_agents_at_location(game_world.player.location) 
-                  if a.id != game_world.player.id and a.state == "alive"]
-        if not targets:
-            print("No targets at this location!")
-            return
-        print(f"\nAvailable targets at {game_world.player.location}:")
-        for i, target in enumerate(targets):
-            print(f"  {i}: {target.id}")
-        try:
-            choice = input("Target number (or press Enter to cancel): ").strip()
-            if choice:
-                target_idx = int(choice)
-                if 0 <= target_idx < len(targets):
-                    event = Actions.apply(game_world, game_world.player, "kill", targets[target_idx].id)
-                    if event:
-                        print(f"Player killed {targets[target_idx].id}")
-                else:
-                    print("Invalid target index!")
-        except ValueError:
-            print("Invalid input!")
-    
-    elif action_name == "say":
-        print("\nSay action format: predicate subject value")
-        print("  predicate: role | location | did")
-        print("  subject: agent_id")
-        print("  value: the claim (e.g., 'bad', 'Engine', 'task')")
-        
-        predicate = input("Predicate (role/location/did): ").strip().lower()
-        if predicate not in ["role", "location", "did"]:
-            print(f"Invalid predicate: {predicate}")
-            return
-        
-        alive_agents = game_world.get_alive_agents()
-        print("\nAvailable agents:")
-        for i, agent in enumerate(alive_agents):
-            print(f"  {i}: {agent.id}")
-        
-        try:
-            subject_choice = input("Subject (agent number or ID): ").strip()
-            try:
-                subject_idx = int(subject_choice)
-                if 0 <= subject_idx < len(alive_agents):
-                    subject = alive_agents[subject_idx].id
-                else:
-                    print("Invalid agent number!")
-                    return
-            except ValueError:
-                subject = subject_choice
-            
-            value = input("Value: ").strip()
-            if value:
-                event = Actions.apply(game_world, game_world.player, "say", predicate, subject, value)
-                if event:
-                    print(f"Player said: {predicate} {subject} = {value}")
-        except (ValueError, IndexError) as e:
-            print(f"Invalid input: {e}")
-    
-    elif action_name == "report":
-        event = Actions.apply(game_world, game_world.player, "report")
-        if event:
-            print("Player made a report")
-    
-    elif action_name == "sabo":
-        event = Actions.apply(game_world, game_world.player, "sabo")
-        if event:
-            print("Player sabotaged")
-    
-    elif action_name == "idle":
-        Actions.apply(game_world, game_world.player, "idle")
-        print("Player is now idle")
-    
-    elif action_name == "task":
-        Actions.apply(game_world, game_world.player, "task")
-        print("Player is now doing a task")
-
-
 def main_loop():
     """Main game loop for visualization."""
-    global agent_positions, game_world, is_player_mode
+    global agent_positions, game_world
     
     running = True
     selected_agent_id = None  # Currently selected agent for brain view
@@ -662,24 +517,6 @@ def main_loop():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            
-            # Keyboard input for player actions (player mode only)
-            elif event.type == pygame.KEYDOWN and is_player_mode and game_world.player:
-                # Handle action key presses
-                if event.key == pygame.K_e:
-                    handle_player_action("enter")
-                elif event.key == pygame.K_k:
-                    handle_player_action("kill")
-                elif event.key == pygame.K_s:
-                    handle_player_action("say")
-                elif event.key == pygame.K_r:
-                    handle_player_action("report")
-                elif event.key == pygame.K_b:
-                    handle_player_action("sabo")
-                elif event.key == pygame.K_i:
-                    handle_player_action("idle")
-                elif event.key == pygame.K_t:
-                    handle_player_action("task")
             
             # Mouse click to select agent
             elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -727,10 +564,7 @@ def main_loop():
         # 6.5. Draw meeting banner (if in meeting phase)
         draw_meeting_banner()
         
-        # 7. Draw player controls (if in player mode)
-        draw_player_controls()
-        
-        # 8. Draw event log (bottom-left corner)
+        # 7. Draw event log (bottom-left corner)
         draw_event_log()
         
         pygame.display.flip()
@@ -739,85 +573,42 @@ def main_loop():
     sys.exit()
 
 
-def show_mode_selection():
-    """Show mode selection dialog and return the choice."""
-    global screen
-    
-    selection = None
-    running = True
-    
-    while running and selection is None:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return None
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_1:
-                    selection = "player"
-                    running = False
-                elif event.key == pygame.K_2:
-                    selection = "simulation"
-                    running = False
-        
-        # Draw mode selection screen
-        screen.fill(DARK_BG)
-        
-        title = font.render("=== DEL-Game Visualizer ===", True, WHITE)
-        title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, 200))
-        screen.blit(title, title_rect)
-        
-        mode1_text = font.render("1. Player Mode (you play as bad agent)", True, WHITE)
-        mode1_rect = mode1_text.get_rect(center=(SCREEN_WIDTH // 2, 300))
-        screen.blit(mode1_text, mode1_rect)
-        
-        mode2_text = font.render("2. Simulation Mode (all NPCs, no player)", True, WHITE)
-        mode2_rect = mode2_text.get_rect(center=(SCREEN_WIDTH // 2, 350))
-        screen.blit(mode2_text, mode2_rect)
-        
-        hint_text = small_font.render("Press 1 or 2 to choose", True, GRAY)
-        hint_rect = hint_text.get_rect(center=(SCREEN_WIDTH // 2, 450))
-        screen.blit(hint_text, hint_rect)
-        
-        pygame.display.flip()
-        clock.tick(FPS)
-    
-    return selection
-
-
 def main():
     """Initialize and start the visualizer."""
-    global game_world, ROOM_COORDS, is_player_mode
+    global game_world, ROOM_COORDS
     
     print("=== DEL-Game Visualizer ===")
     print("Click agents to view their DEL/Kripke model state")
     print("Close window to exit\n")
     
-    # Show mode selection
-    mode = show_mode_selection()
-    if mode is None:
-        pygame.quit()
-        sys.exit()
+    # Initialize game world in simulation mode (all NPCs, no player)
+    import random
+    num_good = 6
+    num_bad = 2
+    num_npcs = num_good + num_bad
+    rooms = ["A", "B", "C", "D", "E"]
     
-    is_player_mode = (mode == "player")
+    # Define room connectivity: A-B, A-C, B-D, C-D
+    # Room E is the meeting room (not connected to any other room)
+    connections = {
+        "A": ["B", "C"],
+        "B": ["A", "D"],
+        "C": ["A", "D"],
+        "D": ["B", "C"],
+        "E": []  # Meeting room - not connected to any other room
+    }
     
-    # Initialize game world based on mode
-    if mode == "simulation":
-        # Simulation mode: all NPCs, no player
-        import random
-        num_npcs = 5
-        rooms = ["A", "B", "C", "D"]
-        npcs = []
-        
-        # Create one bad NPC and rest good
-        for i in range(num_npcs):
-            role = "bad" if i == 0 else "good"
-            npcs.append(NPC(f"npc{i}", role=role, location=random.choice(rooms)))
-        
-        game_world = World(num_npcs=0, seed=42, rooms=rooms, player=False, npcs=npcs)
-        print(f"Starting in SIMULATION mode with {num_npcs} NPCs (1 bad, {num_npcs-1} good)")
-    else:
-        # Player mode (default)
-        game_world = World(num_npcs=4, seed=42)
-        print(f"Starting in PLAYER mode")
+    npcs = []
+    # Create 2 bad NPCs and 6 good NPCs
+    # Note: Agents start in rooms A-D (not E, which is meeting room only)
+    starting_rooms = ["A", "B", "C", "D"]
+    for i in range(num_npcs):
+        role = "bad" if i < num_bad else "good"
+        npcs.append(NPC(f"npc{i}", role=role, location=random.choice(starting_rooms)))
+    
+    game_world = World(num_npcs=0, seed=42, rooms=rooms, player=False, npcs=npcs, connections=connections)
+    print(f"Starting simulation with {num_npcs} NPCs ({num_bad} bad, {num_good} good)")
+    print(f"Rooms: {rooms} (E is meeting room, not connected to other rooms)")
     
     # Generate room coordinates dynamically based on actual rooms
     ROOM_COORDS = generate_room_coords(game_world.rooms)
